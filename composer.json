@@ -1,5 +1,5 @@
 {
-  "name": "kuman/kuman",
+  "name": "kumanphp/kuman",
   "description": "Long-running PHP microframework on Workerman with Express-style routing.",
   "type": "library",
   "license": "MIT",

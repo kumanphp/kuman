@@ -10,7 +10,7 @@ Butuh PHP 8.2+ dengan ekstensi `pcntl` dan `posix` (Linux atau macOS).
 ## Mulai
 
 ```bash
-composer require kuman/kuman
+composer require kumanphp/kuman
 ```
 
 Buat `app.php`:
