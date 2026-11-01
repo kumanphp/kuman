@@ -106,7 +106,7 @@ response). Use `?->` when modifying the result.
 $logger = function (Request $req, callable $next) {
     $start = microtime(true);
     $res = $next($req);
-    return $res?->header('X-Time', (string)(microtime(true) - $start));
+    return $res?->withHeader('X-Time', (string)(microtime(true) - $start));
 };
 
 $auth = fn(Request $req, callable $next) => $req->header('x-token') === 'secret'
@@ -121,6 +121,41 @@ $app->group('/api', $auth, function (App $api) {
     $api->get('/orders', fn() => []);
 });
 ```
+
+## PSR-7
+
+`Kuman\Request` implements `Psr\Http\Message\ServerRequestInterface` and
+`Kuman\Response` implements `ResponseInterface`, so PSR-7 code and middleware
+libraries work with them. Both are immutable: every `with*()` call returns a copy.
+
+```php
+$app->use(function (Request $req, callable $next) {
+    $res = $next($req->withAttribute('start', microtime(true)));
+    return $res?->withHeader('X-Time', (string)(microtime(true) - $req->getAttribute('start')));
+});
+
+$app->post('/upload', function (Request $req) {
+    $req->getUploadedFiles()['avatar']->moveTo('/srv/avatars/me.png');
+    return (new Response())->withStatus(201)->withBody(Stream::from('saved'));
+});
+```
+
+- A handler can return any PSR-7 response, from Kuman or another library. Its body is
+  read when the response is sent.
+- A copy of the request stays in step with the Kuman accessors: after `withUri()`,
+  `withRequestTarget()`, `withMethod()`, `withHeader()` or `withQueryParams()`, the
+  router and `path()`, `method()`, `header()` and `get()` see the new value.
+  `post()`, `file()`, `input()` and `all()` keep reading the received body, so use
+  `getParsedBody()` and `getUploadedFiles()` after `withParsedBody()` or
+  `withUploadedFiles()`. `withBody()` is the exception: it replaces the body for both.
+- `Request::current()` and `$req->connection` belong to the request Kuman received,
+  not to a copy. Call `respond()` on the original or on a copy, both work.
+- Response headers are validated: a name with spaces or a value with a line break
+  throws `InvalidArgumentException`, which becomes a 500.
+- Request header names come lowercased from Workerman, and repeated headers are
+  already joined with a comma in a single value.
+- Replace Workerman's mutating `header()` on responses with `withHeader()`, and
+  `cookie()` with `withCookie()`.
 
 ## WebSocket
 

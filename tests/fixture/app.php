@@ -4,13 +4,16 @@ use Kuman\App;
 use Kuman\Request;
 use Kuman\Response;
 use Kuman\Sse;
+use Kuman\Stream;
 use Workerman\Protocols\Http\Chunk;
 use Workerman\Timer;
+
+require_once __DIR__ . '/ForeignResponse.php';
 
 return function (App $app) {
     $ticks = 0;
     $tag = static fn(string $name) => static function (Request $req, callable $next) use ($name) {
-        return $next($req)?->header("X-$name", 'yes');
+        return $next($req)?->withHeader("X-$name", 'yes');
     };
 
     $app->use($tag('Global'));
@@ -43,6 +46,55 @@ return function (App $app) {
         });
     });
     $app->get('/outside', fn() => 'outside');
+
+    // PSR-7: middleware replaces the request with copies, handlers read it through the interface.
+    $app->use('/psr', static fn(Request $req, callable $next) => $next($req->withAttribute('who', 'middleware')));
+    $app->use('/psr-old', static fn(Request $req, callable $next) => $next(
+        $req->withUri($req->getUri()->withPath('/psr/info')->withQuery('moved=1'))
+    ));
+    $app->all('/psr/info', fn(Request $req) => [
+        'method' => $req->getMethod(),
+        'uri' => (string)$req->getUri(),
+        'target' => $req->getRequestTarget(),
+        'query' => $req->getQueryParams(),
+        'parsed' => $req->getParsedBody(),
+        'body' => (string)$req->getBody(),
+        'agent' => $req->getHeaderLine('X-Agent'),
+        'agents' => $req->getHeader('x-agent'),
+        'hasHost' => $req->hasHeader('HOST'),
+        'who' => $req->getAttribute('who'),
+        'missing' => $req->getAttribute('nothing', 'fallback'),
+        'remote' => $req->getServerParams()['REMOTE_ADDR'] ?? null,
+        'cookies' => $req->getCookieParams(),
+        'version' => $req->getProtocolVersion(),
+        'path' => $req->path(),
+    ]);
+    $app->get('/psr/response', fn() => (new Response())
+        ->withStatus(201, 'Made')
+        ->withHeader('X-Multi', 'a')
+        ->withAddedHeader('x-multi', 'b')
+        ->withHeader('Content-Type', 'text/plain')
+        ->withCookie('one', '1')
+        ->withCookie('two', '2', 60, '/', '', false, true)
+        ->withBody(Stream::from('from a stream')));
+    $app->get('/psr/foreign', fn() => new Fixture\ForeignResponse(
+        Response::text('foreign', 202)->withHeader('X-Foreign', 'yes')
+    ));
+    $app->get('/psr/streamed', fn() => (new Response())->withBody(Stream::open(__DIR__ . '/public/hello.txt')));
+    $app->get('/psr/invalid', fn() => (new Response())->withHeader('X-Bad', "a\r\nSet-Cookie: injected=1"));
+    $app->post('/psr/upload', function (Request $req) {
+        $file = $req->getUploadedFiles()['doc'];
+        $content = (string)$file->getStream();
+        $file->moveTo(__DIR__ . '/uploaded.txt');
+        return [
+            'name' => $file->getClientFilename(),
+            'type' => $file->getClientMediaType(),
+            'size' => $file->getSize(),
+            'content' => $content,
+            'who' => $req->getAttribute('who'),
+            'saved' => file_get_contents(__DIR__ . '/uploaded.txt'),
+        ];
+    });
 
     $app->get('/deferred', function (Request $req) use ($app) {
         $app->after(0.05, fn() => $req->respond(['late' => true]));

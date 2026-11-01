@@ -5,6 +5,8 @@
 const PORT = 18642;
 
 $root = dirname(__DIR__);
+require "$root/vendor/autoload.php";
+require "$root/tests/fixture/ForeignResponse.php";
 $tmp = "$root/tests/tmp";
 $failures = 0;
 $passes = 0;
@@ -443,6 +445,249 @@ function prepare(): void
     file_put_contents("$tmp/public/large.bin", random_bytes(3 * 1024 * 1024));
 }
 
+function throws(callable $callback, string $class = Throwable::class): bool
+{
+    try {
+        $callback();
+    } catch (Throwable $e) {
+        return $e instanceof $class;
+    }
+    return false;
+}
+
+function psr7Objects(): void
+{
+    $uri = new Kuman\Uri('HTTP://User:pw@Example.COM:80/a b/%7e?x=1 2#frag');
+    check('uri scheme', $uri->getScheme(), 'http');
+    check('uri host', $uri->getHost(), 'example.com');
+    check('uri drops the default port', $uri->getPort(), null);
+    check('uri authority', $uri->getAuthority(), 'User:pw@example.com');
+    check('uri encodes the path once', $uri->getPath(), '/a%20b/%7e');
+    check('uri query', $uri->getQuery(), 'x=1%202');
+    check('uri string', (string)$uri, 'http://User:pw@example.com/a%20b/%7e?x=1%202#frag');
+    check('uri keeps a custom port', $uri->withPort(8080)->getPort(), 8080);
+    check('uri is immutable', $uri->getPort(), null);
+    check('uri rejects a bad port', throws(fn() => $uri->withPort(70000), InvalidArgumentException::class));
+    check('uri relative', (string)new Kuman\Uri('/p?q=1'), '/p?q=1');
+    check('uri path under an authority', (string)(new Kuman\Uri('//h'))->withPath('x'), '//h/x');
+    check('uri without authority has no double slash', (string)(new Kuman\Uri())->withPath('//x'), '/x');
+    check('uri rejects garbage', throws(fn() => new Kuman\Uri('http:///x'), InvalidArgumentException::class));
+
+    $stream = Kuman\Stream::from('hello');
+    check('stream size', $stream->getSize(), 5);
+    check('stream read', $stream->read(2), 'he');
+    check('stream tell', $stream->tell(), 2);
+    check('stream rest', $stream->getContents(), 'llo');
+    check('stream eof', $stream->eof());
+    check('stream to string rewinds', (string)$stream, 'hello');
+    $stream->seek(0, SEEK_END);
+    $stream->write('!');
+    check('stream write', (string)$stream, 'hello!');
+    $stream->close();
+    check('stream after close', throws(fn() => $stream->read(1), RuntimeException::class));
+    check('stream size after close', $stream->getSize(), null);
+
+    $response = new Kuman\Response(200, ['Content-Type' => 'text/plain']);
+    $missing = $response->withStatus(404);
+    check('response is immutable', $response->getStatusCode(), 200);
+    check('response status', $missing->getStatusCode(), 404);
+    check('default reason phrase', $missing->getReasonPhrase(), 'Not Found');
+    check('custom reason phrase', $response->withStatus(404, 'Gone Fishing')->getReasonPhrase(), 'Gone Fishing');
+    check('status below range', throws(fn() => new Kuman\Response(99), InvalidArgumentException::class));
+    check('status above range', throws(fn() => $response->withStatus(600), InvalidArgumentException::class));
+    check('header is case-insensitive', $response->getHeaderLine('content-TYPE'), 'text/plain');
+    check('header keeps its case', array_keys($response->getHeaders()), ['Content-Type']);
+    check('replaced header', $response->withHeader('content-type', 'text/html')->getHeaders(), ['content-type' => ['text/html']]);
+    check('added header', $response->withAddedHeader('Content-Type', 'x')->getHeader('Content-Type'), ['text/plain', 'x']);
+    check('added header line', $response->withAddedHeader('Content-Type', 'x')->getHeaderLine('Content-Type'), 'text/plain, x');
+    check('removed header', $response->withoutHeader('CONTENT-TYPE')->hasHeader('Content-Type'), false);
+    check('headers are immutable', $response->getHeader('Content-Type'), ['text/plain']);
+    check('missing header', $response->getHeader('X-None'), []);
+    check('bad header name', throws(fn() => $response->withHeader('Bad Name', 'x'), InvalidArgumentException::class));
+    check('header injection', throws(fn() => $response->withHeader('X-A', "a\r\nX-B: b"), InvalidArgumentException::class));
+    check('empty header values', throws(fn() => $response->withHeader('X-A', []), InvalidArgumentException::class));
+    check('bad protocol version', throws(fn() => $response->withProtocolVersion('x'), InvalidArgumentException::class));
+    check('protocol version', $response->withProtocolVersion('1.0')->getProtocolVersion(), '1.0');
+
+    $body = $response->getBody();
+    check('body is stable', $response->getBody() === $body);
+    check('body from the constructor', (string)(new Kuman\Response(200, [], 'abc'))->getBody(), 'abc');
+    $replaced = $response->withBody(Kuman\Stream::from('new'));
+    check('withBody', (string)$replaced->getBody(), 'new');
+    check('withBody is immutable', (string)$response->getBody(), '');
+
+    $wire = (string)$replaced->withStatus(404)->withAddedHeader('X-Multi', 'a')->withAddedHeader('X-Multi', 'b')
+        ->withCookie('one', '1')->withCookie('two', '2', 60, '/', '', true, true, 'Lax')->toWorkerman();
+    check('wire status line', str_starts_with($wire, "HTTP/1.1 404 Not Found\r\n"));
+    check('wire joins repeated headers', str_contains($wire, "\r\nX-Multi: a, b\r\n"));
+    check('wire keeps cookies apart', str_contains($wire, "\r\nSet-Cookie: one=1\r\nSet-Cookie: two=2; Max-Age=60; Path=/; Secure; HttpOnly; SameSite=Lax\r\n"));
+    check('wire length', str_contains($wire, "\r\nContent-Length: 3\r\n\r\nnew"));
+
+    check('from a string', Kuman\Response::from('x')->getHeaderLine('Content-Type'), 'text/html; charset=utf-8');
+    check('from an array', (string)Kuman\Response::from(['a' => 1])->getBody(), '{"a":1}');
+    check('from itself', Kuman\Response::from($response) === $response);
+    $foreign = Kuman\Response::from(new Fixture\ForeignResponse(Kuman\Response::text('hi', 202)->withHeader('X-F', 'y')));
+    check('from another library', [$foreign->getStatusCode(), $foreign->getHeaderLine('X-F'), (string)$foreign->getBody()], [202, 'y', 'hi']);
+    $workerman = Kuman\Response::from(new Workerman\Protocols\Http\Response(201, ['X-W' => 'z'], 'w'));
+    check('from Workerman', [$workerman->getStatusCode(), $workerman->getHeaderLine('X-W'), (string)$workerman->getBody()], [201, 'z', 'w']);
+
+    $file = dirname(__DIR__) . '/tests/fixture/public/hello.txt';
+    $served = Kuman\Response::file($file);
+    check('file body', (string)$served->getBody(), "static hello\n");
+    check('file is sent from disk', $served->toWorkerman()->file['file'], $file);
+    check('file slice', (string)$served->withFile($file, 7, 5)->getBody(), 'hello');
+    check('file keeps its headers', $served->withHeader('X-A', 'b')->toWorkerman()->file !== null);
+    check('withBody replaces the file', $served->withBody(Kuman\Stream::from('x'))->toWorkerman()->file, null);
+    check('missing file', Kuman\Response::file("$file.nothing")->getStatusCode(), 404);
+
+    $raw = "POST /a/b?x=1&y[]=2 HTTP/1.1\r\nHost: Example.com:8080\r\nContent-Type: application/json\r\nX-Agent: one\r\nContent-Length: 7\r\n\r\n{\"k\":1}";
+    $request = new Kuman\Request($raw);
+    check('request method', $request->getMethod(), 'POST');
+    check('request target', $request->getRequestTarget(), '/a/b?x=1&y[]=2');
+    check('request uri', (string)$request->getUri(), 'http://example.com:8080/a/b?x=1&y%5B%5D=2');
+    check('request uri is stable', $request->getUri() === $request->getUri());
+    check('request query', $request->getQueryParams(), ['x' => '1', 'y' => ['2']]);
+    check('request header', $request->getHeaderLine('X-AGENT'), 'one');
+    check('request has header', $request->hasHeader('host'));
+    check('request headers', $request->getHeaders()['x-agent'], ['one']);
+    check('request parsed body', $request->getParsedBody(), ['k' => 1]);
+    check('request body', (string)$request->getBody(), '{"k":1}');
+    check('request body is stable', $request->getBody() === $request->getBody());
+    check('request protocol', $request->getProtocolVersion(), '1.1');
+    check('request attributes', $request->getAttributes(), []);
+    check('request server params', $request->getServerParams()['REQUEST_METHOD'], 'POST');
+    check('request without a body has none parsed', (new Kuman\Request("GET / HTTP/1.1\r\nHost: t\r\n\r\n"))->getParsedBody(), null);
+    check('request with a text body has none parsed', (new Kuman\Request("POST / HTTP/1.1\r\nHost: t\r\nContent-Type: text/plain\r\n\r\nx"))->getParsedBody(), null);
+    check('request with a broken host', (string)(new Kuman\Request("GET /x?y=1 HTTP/1.1\r\nHost: http://\r\n\r\n"))->getUri()->getPath(), '/x');
+
+    $put = $request->withMethod('PUT');
+    check('withMethod', [$put->getMethod(), $put->method(), $request->getMethod()], ['PUT', 'PUT', 'POST']);
+    check('withMethod rejects garbage', throws(fn() => $request->withMethod('GE T'), InvalidArgumentException::class));
+
+    $headers = $request->withHeader('X-Agent', ['a', 'b']);
+    check('withHeader', $headers->getHeader('x-agent'), ['a', 'b']);
+    check('withHeader reaches header()', $headers->header('x-agent'), 'a,b');
+    check('withHeader leaves the original', $request->header('x-agent'), 'one');
+    check('withAddedHeader', $request->withAddedHeader('X-Agent', 'two')->getHeader('X-Agent'), ['one', 'two']);
+    check('withoutHeader', $request->withoutHeader('X-Agent')->header('x-agent'), null);
+
+    $moved = $request->withUri(new Kuman\Uri('/other?z=9'));
+    check('withUri reaches path()', $moved->path(), '/other');
+    check('withUri reaches get()', $moved->get('z'), '9');
+    check('withUri target', $moved->getRequestTarget(), '/other?z=9');
+    check('withUri keeps the host', $moved->getHeaderLine('Host'), 'Example.com:8080');
+    check('withUri leaves the original', $request->path(), '/a/b');
+    check('withUri updates the host', $request->withUri(new Kuman\Uri('http://new.test:81/p'))->getHeaderLine('Host'), 'new.test:81');
+    check('withUri can preserve the host', $request->withUri(new Kuman\Uri('http://new.test/p'), true)->getHeaderLine('Host'), 'Example.com:8080');
+    check('withUri without a path', $request->withUri(new Kuman\Uri('http://new.test'))->path(), '/');
+
+    $target = $request->withRequestTarget('/q?a=1');
+    check('withRequestTarget', [$target->path(), $target->get('a'), (string)$target->getUri()], ['/q', '1', 'http://example.com:8080/q?a=1']);
+    check('withRequestTarget rejects whitespace', throws(fn() => $request->withRequestTarget('/a b'), InvalidArgumentException::class));
+
+    check('withQueryParams', $request->withQueryParams(['q' => '1'])->get('q'), '1');
+    check('withQueryParams leaves the original', $request->get('q'), null);
+    check('withCookieParams', $request->withCookieParams(['c' => 'v'])->getCookieParams(), ['c' => 'v']);
+    check('withAttribute', $request->withAttribute('a', 1)->getAttribute('a'), 1);
+    check('withAttribute leaves the original', $request->getAttribute('a', 'none'), 'none');
+    check('withoutAttribute', $request->withAttribute('a', 1)->withoutAttribute('a')->getAttributes(), []);
+    check('null attribute', $request->withAttribute('a', null)->getAttribute('a', 'x'), null);
+    check('withParsedBody', $request->withParsedBody(['x' => 1])->getParsedBody(), ['x' => 1]);
+    check('withParsedBody null', $request->withParsedBody(null)->getParsedBody(), null);
+    check('withParsedBody rejects scalars', throws(fn() => $request->withParsedBody('x'), InvalidArgumentException::class));
+    check('withProtocolVersion', $request->withProtocolVersion('1.0')->protocolVersion(), '1.0');
+
+    $other = $request->withBody(Kuman\Stream::from('{"k":2}'));
+    check('withBody stream', (string)$other->getBody(), '{"k":2}');
+    check('withBody reaches post()', $other->post('k'), 2);
+    check('withBody parsed', $other->getParsedBody(), ['k' => 2]);
+    check('withBody leaves the original', (string)$request->getBody(), '{"k":1}');
+
+    $form = "--XX\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nhi\r\n--XX\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nfile body\r\n--XX--\r\n";
+    $upload = new Kuman\Request("POST /u HTTP/1.1\r\nHost: t\r\nContent-Type: multipart/form-data; boundary=XX\r\nContent-Length: " . strlen($form) . "\r\n\r\n$form");
+    $files = $upload->getUploadedFiles();
+    $doc = $files['doc'] ?? null;
+    check('uploaded file', $doc instanceof Psr\Http\Message\UploadedFileInterface);
+    check('uploaded file details', [$doc?->getClientFilename(), $doc?->getClientMediaType(), $doc?->getSize(), $doc?->getError()], ['a.txt', 'text/plain', 9, UPLOAD_ERR_OK]);
+    check('uploaded file stream', (string)$doc?->getStream(), 'file body');
+    check('multipart parsed body', $upload->getParsedBody(), ['title' => 'hi']);
+    check('uploads are stable', $upload->getUploadedFiles() === $files);
+    check('no uploads on a form', $request->getUploadedFiles(), []);
+    check('withUploadedFiles', $request->withUploadedFiles(['f' => $doc])->getUploadedFiles(), ['f' => $doc]);
+    check('withUploadedFiles rejects others', throws(fn() => $request->withUploadedFiles(['f' => 'x']), InvalidArgumentException::class));
+
+    // The request deletes its temporary files when it goes, a copy dropped on the way must not.
+    $path = $upload->file('doc')['tmp_name'];
+    $copy = $upload->withAttribute('a', 1)->withAttribute('b', 2);
+    unset($copy);
+    check('a dropped copy keeps the upload', is_file($path));
+    $moved = tempnam(sys_get_temp_dir(), 'kuman-test');
+    $doc->moveTo($moved);
+    check('moveTo', file_get_contents($moved), 'file body');
+    check('moveTo twice', throws(fn() => $doc->moveTo($moved), RuntimeException::class));
+    check('stream after moveTo', throws(fn() => $doc->getStream(), RuntimeException::class));
+    unlink($moved);
+
+    $again = new Kuman\Request("POST /u HTTP/1.1\r\nHost: t\r\nContent-Type: multipart/form-data; boundary=XX\r\nContent-Length: " . strlen($form) . "\r\n\r\n$form");
+    $again->getUploadedFiles();
+    $path = $again->file('doc')['tmp_name'];
+    unset($again);
+    check('the request deletes its upload', is_file($path), false);
+}
+
+function psr7Http(): void
+{
+    $response = http('POST', '/psr/info?a=1&b[]=2', ['Content-Type' => 'application/json', 'X-Agent' => 'curl', 'Cookie' => 's=1'], '{"k":[1,2]}');
+    $info = json_decode($response['body'], true);
+    check('psr method', $info['method'], 'POST');
+    check('psr uri', $info['uri'], 'http://test/psr/info?a=1&b%5B%5D=2');
+    check('psr target', $info['target'], '/psr/info?a=1&b[]=2');
+    check('psr query', $info['query'], ['a' => '1', 'b' => ['2']]);
+    check('psr parsed body', $info['parsed'], ['k' => [1, 2]]);
+    check('psr body', $info['body'], '{"k":[1,2]}');
+    check('psr header', [$info['agent'], $info['agents'], $info['hasHost']], ['curl', ['curl'], true]);
+    check('psr cookies', $info['cookies'], ['s' => '1']);
+    check('psr attribute from middleware', $info['who'], 'middleware');
+    check('psr attribute default', $info['missing'], 'fallback');
+    check('psr server params', $info['remote'], '127.0.0.1');
+    check('psr version', $info['version'], '1.1');
+
+    $rewritten = json_decode(http('GET', '/psr-old/anything?x=1')['body'], true);
+    check('middleware can rewrite the uri', [$rewritten['path'], $rewritten['query'], $rewritten['uri']], ['/psr/info', ['moved' => '1'], 'http://test/psr/info?moved=1']);
+
+    $built = http('GET', '/psr/response');
+    check('psr response status line', str_starts_with($built['head'], 'HTTP/1.1 201 Made'));
+    check('psr response body', $built['body'], 'from a stream');
+    check('psr response added header', hasHeader($built, 'X-Multi: a, b'));
+    check('psr response content type', hasHeader($built, 'Content-Type: text/plain'));
+    check('psr response cookies', preg_match_all('/\r\nSet-Cookie: (?:one=1|two=2; Max-Age=60; Path=\/; HttpOnly)(?=\r\n)/', $built['head']), 2);
+
+    $foreign = http('GET', '/psr/foreign');
+    check('response from another library', [$foreign['status'], $foreign['body'], hasHeader($foreign, 'X-Foreign: yes')], [202, 'foreign', true]);
+    check('response from a file stream', http('GET', '/psr/streamed')['body'], "static hello\n");
+
+    $invalid = http('GET', '/psr/invalid');
+    check('invalid header fails the request', $invalid['status'], 500);
+    check('invalid header is not sent', stripos($invalid['head'], 'injected'), false);
+
+    $static = http('GET', '/hello.txt');
+    check('middleware reaches a file response', hasHeader($static, 'X-Global: yes'));
+    check('file response keeps its body', $static['body'], "static hello\n");
+    $slice = http('GET', '/hello.txt', ['Range' => 'bytes=7-11']);
+    check('file response keeps its range', [$slice['status'], $slice['body'], hasHeader($slice, 'X-Global: yes')], [206, 'hello', true]);
+
+    $form = "--XX\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nfile body\r\n--XX--\r\n";
+    $upload = http('POST', '/psr/upload', ['Content-Type' => 'multipart/form-data; boundary=XX'], $form);
+    check('uploaded file over http', json_decode($upload['body'], true), [
+        'name' => 'a.txt',
+        'type' => 'text/plain',
+        'size' => 9,
+        'content' => 'file body',
+        'who' => 'middleware',
+        'saved' => 'file body',
+    ]);
+}
+
 function suite(string $title, string $loop, array $tests): void
 {
     global $failures;
@@ -464,9 +709,11 @@ function suite(string $title, string $loop, array $tests): void
     echo $failures === $before ? "  ok\n" : "  failed\n";
 }
 
-$common = ['routing', 'middleware', 'connectionHandling', 'errors', 'statics', 'realtime', 'websockets', 'reloading'];
+$common = ['routing', 'middleware', 'psr7Http', 'connectionHandling', 'errors', 'statics', 'realtime', 'websockets', 'reloading'];
 
 try {
+    echo "psr-7 objects\n";
+    psr7Objects();
     suite('default event loop', '', $common);
     suite('fiber event loop', 'fiber', [...$common, 'concurrency']);
     echo "watcher\n";

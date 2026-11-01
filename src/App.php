@@ -302,7 +302,7 @@ class App
             return Response::file($file, $request);
         }
         if ($match[0] === Dispatcher::METHOD_NOT_ALLOWED) {
-            return Response::text('Method Not Allowed', 405)->header('Allow', implode(', ', $match[1]));
+            return Response::text('Method Not Allowed', 405)->withHeader('Allow', implode(', ', $match[1]));
         }
         return $this->notFoundHandler === null
             ? Response::text('Not Found', 404)
@@ -329,7 +329,7 @@ class App
         return in_array(strtolower(pathinfo($file, PATHINFO_EXTENSION)), self::NOT_SERVED, true) ? null : $file;
     }
 
-    private function render(Throwable $e, Request $request): BaseResponse
+    private function render(Throwable $e, Request $request): Response
     {
         $this->report($e);
         if ($this->errorHandler !== null) {
@@ -373,7 +373,7 @@ class App
             return $handler(...);
         }
 
-        $normalize = static fn(callable $step) => static function (Request $request) use ($step): ?BaseResponse {
+        $normalize = static fn(callable $step) => static function (Request $request) use ($step): ?Response {
             $response = $step($request);
             return $response === null ? null : Response::from($response);
         };

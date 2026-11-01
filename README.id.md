@@ -105,7 +105,7 @@ Karena itu pakai `?->` saat mengubah hasilnya.
 $logger = function (Request $req, callable $next) {
     $start = microtime(true);
     $res = $next($req);
-    return $res?->header('X-Time', (string)(microtime(true) - $start));
+    return $res?->withHeader('X-Time', (string)(microtime(true) - $start));
 };
 
 $auth = fn(Request $req, callable $next) => $req->header('x-token') === 'rahasia'
@@ -120,6 +120,43 @@ $app->group('/api', $auth, function (App $api) {
     $api->get('/orders', fn() => []);
 });
 ```
+
+## PSR-7
+
+`Kuman\Request` mengimplementasikan `Psr\Http\Message\ServerRequestInterface` dan
+`Kuman\Response` mengimplementasikan `ResponseInterface`, jadi kode PSR-7 dan
+pustaka middleware bisa dipakai. Keduanya immutable: setiap `with*()` mengembalikan
+salinan.
+
+```php
+$app->use(function (Request $req, callable $next) {
+    $res = $next($req->withAttribute('mulai', microtime(true)));
+    return $res?->withHeader('X-Time', (string)(microtime(true) - $req->getAttribute('mulai')));
+});
+
+$app->post('/upload', function (Request $req) {
+    $req->getUploadedFiles()['avatar']->moveTo('/srv/avatars/me.png');
+    return (new Response())->withStatus(201)->withBody(Stream::from('tersimpan'));
+});
+```
+
+- Handler boleh mengembalikan response PSR-7 apa pun, dari Kuman maupun pustaka
+  lain. Body-nya dibaca saat response dikirim.
+- Salinan request tetap selaras dengan accessor Kuman: setelah `withUri()`,
+  `withRequestTarget()`, `withMethod()`, `withHeader()`, atau `withQueryParams()`,
+  router serta `path()`, `method()`, `header()`, dan `get()` melihat nilai barunya.
+  `post()`, `file()`, `input()`, dan `all()` tetap membaca body yang diterima, jadi
+  pakai `getParsedBody()` dan `getUploadedFiles()` setelah `withParsedBody()` atau
+  `withUploadedFiles()`. Pengecualiannya `withBody()`: ia mengganti body untuk
+  keduanya.
+- `Request::current()` dan `$req->connection` milik request yang diterima Kuman,
+  bukan salinannya. `respond()` boleh dipanggil dari request asli maupun salinan.
+- Header response divalidasi: nama dengan spasi atau nilai dengan baris baru
+  melempar `InvalidArgumentException`, yang menjadi 500.
+- Nama header request datang dalam huruf kecil dari Workerman, dan header yang
+  berulang sudah digabung dengan koma menjadi satu nilai.
+- Ganti `header()` Workerman yang mengubah objek pada response dengan
+  `withHeader()`, dan `cookie()` dengan `withCookie()`.
 
 ## WebSocket
 
