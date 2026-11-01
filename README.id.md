@@ -13,6 +13,18 @@ Butuh PHP 8.2+ dengan ekstensi `pcntl` dan `posix` (Linux atau macOS).
 
 ## Mulai
 
+Mulai proyek baru dari [skeleton](https://github.com/kumanphp/app):
+
+```bash
+composer create-project kumanphp/app myapp
+cd myapp
+vendor/bin/kuman
+```
+
+Lalu buka <http://localhost:8642>. Definisikan route Anda di `app.php`.
+
+### Tambahkan ke proyek yang sudah ada
+
 ```bash
 composer require kumanphp/kuman
 ```

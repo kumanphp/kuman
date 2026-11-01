@@ -13,6 +13,18 @@ Requires PHP 8.2+ with the `pcntl` and `posix` extensions (Linux or macOS).
 
 ## Getting started
 
+Start a new project from the [skeleton](https://github.com/kumanphp/app):
+
+```bash
+composer create-project kumanphp/app myapp
+cd myapp
+vendor/bin/kuman
+```
+
+Then open <http://localhost:8642>. Define your routes in `app.php`.
+
+### Add to an existing project
+
 ```bash
 composer require kumanphp/kuman
 ```
