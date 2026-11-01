@@ -25,6 +25,7 @@
   },
   "suggest": {
     "ext-event": "Removes the 1024 connection limit of the select() loop.",
+    "ext-openssl": "Required for RS* and ES* JSON Web Tokens.",
     "revolt/event-loop": "Required for the fiber event loop."
   },
   "autoload": {

@@ -739,6 +739,262 @@ function psr7Http(): void
     ]);
 }
 
+function jwtToken(string $header, string $payload, string $signature = ''): string
+{
+    $encode = static fn(string $data) => rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
+    return $encode($header) . '.' . $encode($payload) . '.' . $encode($signature);
+}
+
+function authObjects(): void
+{
+    $secret = str_repeat('s', 32);
+    $jwt = new Kuman\Auth\Jwt($secret);
+    $token = $jwt->issue(['sub' => 7]);
+    $claims = $jwt->verify($token);
+    check('jwt round trip', $claims['sub'] ?? null, 7);
+    check('jwt adds iat and exp', ($claims['exp'] ?? 0) - ($claims['iat'] ?? 0), 3600);
+    check('jwt other secret', (new Kuman\Auth\Jwt(str_repeat('t', 32)))->verify($token), null);
+    $forever = new Kuman\Auth\Jwt($secret, ttl: null);
+    check('jwt ttl null has no exp', array_keys($forever->verify($forever->issue()) ?? []), ['iat']);
+
+    [$head, $body, $signature] = explode('.', $token);
+    $other = rtrim(strtr(base64_encode('{"sub":8,"exp":9999999999}'), '+/', '-_'), '=');
+    check('jwt changed payload', $jwt->verify("$head.$other.$signature"), null);
+    check('jwt missing part', $jwt->verify("$head.$body"), null);
+    check('jwt extra part', $jwt->verify("$token.x"), null);
+    check('jwt not base64', $jwt->verify("$head.$body.@@@"), null);
+    check('jwt empty', $jwt->verify(''), null);
+    check('jwt empty signature', $jwt->verify("$head.$body."), null);
+    check('jwt scalar header', $jwt->verify(jwtToken('1', '{}', 'x')), null);
+
+    check('jwt alg none', $jwt->verify(jwtToken('{"alg":"none"}', '{"sub":7}')), null);
+    check('jwt alg none in capitals', $jwt->verify(jwtToken('{"alg":"NONE"}', '{"sub":7}')), null);
+    $sign = static fn(string $header, string $payload, string $key) => jwtToken($header, $payload, hash_hmac(
+        'sha256',
+        rtrim(strtr(base64_encode($header), '+/', '-_'), '=') . '.' . rtrim(strtr(base64_encode($payload), '+/', '-_'), '='),
+        $key,
+        true
+    ));
+    check('jwt alg it does not use', (new Kuman\Auth\Jwt(str_repeat('s', 64), 'HS512'))->verify($token), null);
+    check('jwt signed by hand verifies', $jwt->verify($sign('{"alg":"HS256"}', '{"sub":7}', $secret)), ['sub' => 7]);
+    check('jwt header names another algorithm', $jwt->verify($sign('{"alg":"HS512"}', '{"sub":7}', $secret)), null);
+    check('jwt crit', $jwt->verify($sign('{"alg":"HS256","crit":["x"]}', '{"sub":7}', $secret)), null);
+    check('jwt payload not an object', $jwt->verify($sign('{"alg":"HS256"}', '7', $secret)), null);
+    check('jwt exp as text', $jwt->verify($sign('{"alg":"HS256"}', '{"exp":"9999999999"}', $secret)), null);
+    check('jwt nbf as text', $jwt->verify($sign('{"alg":"HS256"}', '{"nbf":"0"}', $secret)), null);
+
+    check('jwt expired', $jwt->verify($jwt->issue(['exp' => time() - 1])), null);
+    check('jwt expires at exp', $jwt->verify($jwt->issue(['exp' => time()])), null);
+    check('jwt not yet valid', $jwt->verify($jwt->issue(['nbf' => time() + 60])), null);
+    $lenient = new Kuman\Auth\Jwt($secret, leeway: 120);
+    check('jwt leeway on exp', $lenient->verify($lenient->issue(['exp' => time() - 60])) !== null);
+    check('jwt leeway on nbf', $lenient->verify($lenient->issue(['nbf' => time() + 60])) !== null);
+
+    $strict = new Kuman\Auth\Jwt($secret, issuer: 'me', audience: 'app');
+    check('jwt issuer and audience', ($strict->verify($strict->issue()) ?? [])['iss'] ?? null, 'me');
+    check('jwt missing issuer', $strict->verify($jwt->issue(['aud' => 'app'])), null);
+    check('jwt other issuer', $strict->verify($jwt->issue(['iss' => 'you', 'aud' => 'app'])), null);
+    check('jwt missing audience', $strict->verify($jwt->issue(['iss' => 'me'])), null);
+    check('jwt audience in a list', $strict->verify($jwt->issue(['iss' => 'me', 'aud' => ['x', 'app']])) !== null);
+    check('jwt other audience', $strict->verify($jwt->issue(['iss' => 'me', 'aud' => ['x']])), null);
+
+    check('jwt short secret', throws(fn() => new Kuman\Auth\Jwt('short'), InvalidArgumentException::class));
+    check('jwt secret too short for HS512', throws(fn() => new Kuman\Auth\Jwt($secret, 'HS512'), InvalidArgumentException::class));
+    check('jwt unknown algorithm', throws(fn() => new Kuman\Auth\Jwt($secret, 'none'), InvalidArgumentException::class));
+
+    // RFC 7515 appendix A: tokens signed by someone else's code. They expired in 2011.
+    $old = 2000000000;
+    $rfcSecret = base64_decode(strtr('AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow', '-_', '+/'));
+    $rfcClaims = 'eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ';
+    check('jwt rfc 7515 HS256', (new Kuman\Auth\Jwt($rfcSecret, leeway: $old))->verify("eyJ0eXAiOiJKV1QiLA0KICJhbGciOiJIUzI1NiJ9.$rfcClaims.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")['iss'] ?? null, 'joe');
+    $point = base64_decode(strtr('f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU', '-_', '+/')) . base64_decode(strtr('x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0', '-_', '+/'));
+    $rfcPublic = "-----BEGIN PUBLIC KEY-----\n" . chunk_split(base64_encode(hex2bin('3059301306072a8648ce3d020106082a8648ce3d030107034200') . "\x04" . $point), 64, "\n") . "-----END PUBLIC KEY-----\n";
+    check('jwt rfc 7515 ES256', (new Kuman\Auth\Jwt($rfcPublic, 'ES256', leeway: $old))->verify("eyJhbGciOiJFUzI1NiJ9.$rfcClaims.DtEhU3ljbEg8L38VWAfUAqOyKAM6-Xx-F4GawxaepmXFCgfTjDxw5djxLa8ISlSApmWQxfKTUJqPP3-Kg6NU1Q")['iss'] ?? null, 'joe');
+
+    $export = static function (array $options): array {
+        $key = openssl_pkey_new($options);
+        openssl_pkey_export($key, $private);
+        return [$private, openssl_pkey_get_details($key)['key']];
+    };
+    [$rsaPrivate, $rsaPublic] = $export(['private_key_type' => OPENSSL_KEYTYPE_RSA, 'private_key_bits' => 2048]);
+    foreach (['RS256', 'RS384', 'RS512'] as $algorithm) {
+        $issuer = new Kuman\Auth\Jwt($rsaPrivate, $algorithm);
+        check("jwt $algorithm", (new Kuman\Auth\Jwt($rsaPublic, $algorithm))->verify($issuer->issue(['sub' => 1]))['sub'] ?? null, 1);
+    }
+    $rsa = new Kuman\Auth\Jwt($rsaPublic, 'RS256');
+    check('jwt a public key cannot issue', throws(fn() => $rsa->issue(), RuntimeException::class));
+    check('jwt private key verifies too', (new Kuman\Auth\Jwt($rsaPrivate, 'RS256'))->verify((new Kuman\Auth\Jwt($rsaPrivate, 'RS256'))->issue()) !== null);
+    check('jwt the public key is not an HMAC secret', $rsa->verify($sign('{"alg":"HS256"}', '{"sub":7}', $rsaPublic)), null);
+    check('jwt not a key', throws(fn() => new Kuman\Auth\Jwt('not a key', 'RS256'), InvalidArgumentException::class));
+    [$weak] = $export(['private_key_type' => OPENSSL_KEYTYPE_RSA, 'private_key_bits' => 1024]);
+    check('jwt weak rsa key', throws(fn() => new Kuman\Auth\Jwt($weak, 'RS256'), InvalidArgumentException::class));
+
+    foreach (['ES256' => 'prime256v1', 'ES384' => 'secp384r1'] as $algorithm => $curve) {
+        [$private, $public] = $export(['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => $curve]);
+        $issuer = new Kuman\Auth\Jwt($private, $algorithm);
+        $verifier = new Kuman\Auth\Jwt($public, $algorithm);
+        // Enough signatures to meet integers with leading zero bytes, which DER drops.
+        $good = 0;
+        for ($i = 0; $i < 500; $i++) {
+            $good += $verifier->verify($issuer->issue(['n' => $i])) === null ? 0 : 1;
+        }
+        check("jwt $algorithm", $good, 500);
+        [$head, $body, $signature] = explode('.', $issuer->issue());
+        check("jwt $algorithm short signature", $verifier->verify("$head.$body." . substr($signature, 0, -4)), null);
+    }
+    check('jwt curve of another algorithm', throws(fn() => new Kuman\Auth\Jwt($export(['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'secp384r1'])[0], 'ES256'), InvalidArgumentException::class));
+    check('jwt rsa key for ecdsa', throws(fn() => new Kuman\Auth\Jwt($rsaPrivate, 'ES256'), InvalidArgumentException::class));
+
+    $hash = password_hash('secret', PASSWORD_BCRYPT, ['cost' => 4]);
+    check('password verifies', Kuman\Auth::verify('secret', $hash));
+    check('wrong password', Kuman\Auth::verify('nope', $hash), false);
+    check('array as password', Kuman\Auth::verify(['secret'], $hash), false);
+    check('no account', Kuman\Auth::verify('secret', null), false);
+    check('empty password without account', Kuman\Auth::verify('', null), false);
+    check('empty hash', Kuman\Auth::verify('secret', ''), false);
+    check('hash round trip', password_verify('x', Kuman\Auth::hash('x')));
+    check('token size', strlen(Kuman\Auth::token()), 64);
+    check('tokens differ', Kuman\Auth::token() === Kuman\Auth::token(), false);
+
+    check('plain password in a user map', throws(fn() => Kuman\Auth::basic(['ana' => 'secret']), InvalidArgumentException::class));
+    check('short fixed token', throws(fn() => Kuman\Auth::bearer(['short' => 'ana']), InvalidArgumentException::class));
+    check('token key from an unset variable', throws(fn() => Kuman\Auth::apiKey([false => 'ana']), InvalidArgumentException::class));
+    check('any without guards', throws(fn() => Kuman\Auth::any(), InvalidArgumentException::class));
+}
+
+function basicHeader(string $credentials): array
+{
+    return ['Authorization' => 'Basic ' . base64_encode($credentials)];
+}
+
+function sessionCookie(array $response): ?string
+{
+    return preg_match('/\r\nSet-Cookie: PHPSID=([^;\r]+)/', $response['head'], $match) ? $match[1] : null;
+}
+
+function authentication(): void
+{
+    $token = 'fixture-token-0123456789';
+    $bearer = ['Authorization' => "Bearer $token"];
+
+    $denied = http('GET', '/auth/basic');
+    check('basic without credentials', [$denied['status'], $denied['body']], [401, '{"error":"unauthorized"}']);
+    check('basic challenge quotes the realm', hasHeader($denied, 'WWW-Authenticate: Basic realm="Say \\"hi\\"", charset="UTF-8"'));
+    check('basic password with a colon', json_decode(http('GET', '/auth/basic', basicHeader('ana:pa:ss'))['body'], true), ['user' => 'ana', 'current' => 'ana']);
+    check('basic scheme ignores case', http('GET', '/auth/basic', ['Authorization' => 'bAsIc ' . base64_encode('ana:pa:ss')])['status'], 200);
+    check('basic wrong password', http('GET', '/auth/basic', basicHeader('ana:nope'))['status'], 401);
+    check('basic unknown user', http('GET', '/auth/basic', basicHeader('bob:pa:ss'))['status'], 401);
+    check('basic without a colon', http('GET', '/auth/basic', basicHeader('anapass'))['status'], 401);
+    check('basic control character', http('GET', '/auth/basic', basicHeader("ana:pa:ss\0"))['status'], 401);
+    check('basic bad base64', http('GET', '/auth/basic', ['Authorization' => 'Basic @@@'])['status'], 401);
+    check('basic other scheme', http('GET', '/auth/basic', $bearer)['status'], 401);
+    check('basic callback returning true gives the username', json_decode(http('GET', '/auth/basic-callback', basicHeader('ana:x'))['body'], true)['user'] ?? null, 'ana');
+    check('basic callback returning false', http('GET', '/auth/basic-callback', basicHeader('ana:y'))['status'], 401);
+
+    check('bearer', json_decode(http('GET', '/auth/bearer', $bearer)['body'], true)['user'] ?? null, 'ana');
+    $missing = http('GET', '/auth/bearer');
+    check('bearer without a token has no error code', hasHeader($missing, 'WWW-Authenticate: Bearer realm="api"' . "\r\n"));
+    $wrong = http('GET', '/auth/bearer', ['Authorization' => 'Bearer wrong-token-012345678']);
+    check('bearer wrong token', [$wrong['status'], hasHeader($wrong, 'WWW-Authenticate: Bearer realm="api", error="invalid_token"')], [401, true]);
+    check('bearer two tokens', http('GET', '/auth/bearer', ['Authorization' => "Bearer $token, Bearer $token"])['status'], 401);
+    check('bearer in the query', http('GET', "/auth/bearer?access_token=$token")['status'], 200);
+    check('bearer query as an array', http('GET', "/auth/bearer?access_token[]=$token")['status'], 401);
+    check('bearer query is off by default', http('GET', "/auth/shared?access_token=$token")['status'], 401);
+    check('bearer token that PHP keeps as an integer key', http('GET', '/auth/numeric', ['Authorization' => 'Bearer 1234567890123456'])['status'], 200);
+    check('bearer callback result', json_decode(http('GET', '/auth/bearer-callback', ['Authorization' => 'Bearer good'])['body'], true)['user'] ?? null, ['id' => 1]);
+    check('bearer callback returning false', http('GET', '/auth/bearer-callback', ['Authorization' => 'Bearer bad'])['status'], 401);
+
+    check('api key', json_decode(http('GET', '/auth/key', ['X-API-Key' => $token])['body'], true)['user'] ?? null, 'ci');
+    check('api key challenge', hasHeader(http('GET', '/auth/key'), 'WWW-Authenticate: ApiKey realm="api"'));
+    check('api key empty', http('GET', '/auth/key', ['X-API-Key' => ''])['status'], 401);
+    check('api key wrong', http('GET', '/auth/key', ['X-API-Key' => 'wrong-token-012345678'])['status'], 401);
+    check('api key is not a bearer token', http('GET', '/auth/key', $bearer)['status'], 401);
+    check('api key in the query is off by default', http('GET', "/auth/key?key=$token")['status'], 401);
+    check('api key in a named header', http('GET', '/auth/key-named', ['X-Other' => $token])['status'], 200);
+    check('api key in a named query', http('GET', "/auth/key-named?key=$token")['status'], 200);
+
+    $issued = json_decode(http('POST', '/auth/jwt/login')['body'], true)['token'];
+    $claims = json_decode(http('GET', '/auth/jwt', ['Authorization' => "Bearer $issued"])['body'], true)['user'];
+    check('jwt guard gives the claims', [$claims['sub'], $claims['iss']], ['ana', 'kuman']);
+    check('jwt guard resolves the user', json_decode(http('GET', '/auth/jwt-resolved', ['Authorization' => "Bearer $issued"])['body'], true)['user'] ?? null, 'ANA');
+    $broken = http('GET', '/auth/jwt', ['Authorization' => 'Bearer ' . substr($issued, 0, -2) . 'xx']);
+    check('jwt guard refuses a changed token', [$broken['status'], str_contains($broken['head'], 'error="invalid_token"')], [401, true]);
+    check('jwt guard refuses alg none', http('GET', '/auth/jwt', ['Authorization' => 'Bearer ' . jwtToken('{"alg":"none"}', '{"sub":"ana","iss":"kuman"}')])['status'], 401);
+
+    $anonymous = http('GET', '/auth/session');
+    check('session guard without a login', $anonymous['status'], 401);
+    check('session guard starts no session', hasHeader($anonymous, 'Set-Cookie'), false);
+    $redirect = http('GET', '/auth/session-page');
+    check('session guard redirects', [$redirect['status'], hasHeader($redirect, 'Location: /login')], [302, true]);
+    check('session guard with an invalid cookie', hasHeader(http('GET', '/auth/session', ['Cookie' => 'PHPSID=x']), 'Set-Cookie'), false);
+
+    $planted = 'plantedsession0123456789';
+    $login = http('POST', '/auth/login', ['Content-Type' => 'application/json', 'Cookie' => "PHPSID=$planted"], '{"id":"7"}');
+    $sid = sessionCookie($login);
+    check('login is stored before the response', json_decode($login['body'], true), ['stored' => true]);
+    check('login replaces a planted session id', $sid !== null && $sid !== $planted);
+    check('login keeps the cookies of the response', hasHeader($login, 'Set-Cookie: theme=dark'));
+    check('session cookie is HttpOnly', preg_match('/\r\nSet-Cookie: PHPSID=[^\r]*; HttpOnly/', $login['head']), 1);
+    check('session cookie is SameSite=Lax', preg_match('/\r\nSet-Cookie: PHPSID=[^\r]*; SameSite=Lax/', $login['head']), 1);
+    check('session directory is private', fileperms($GLOBALS['tmp'] . '/runtime/sessions') & 0777, 0700);
+
+    $cookie = ['Cookie' => "PHPSID=$sid"];
+    check('session guard', json_decode(http('GET', '/auth/session', $cookie)['body'], true), ['user' => '7', 'current' => '7']);
+    check('planted session id stays anonymous', http('GET', '/auth/session', ['Cookie' => "PHPSID=$planted"])['status'], 401);
+    check('session resolver', json_decode(http('GET', '/auth/session-resolved', $cookie)['body'], true)['user'] ?? null, 'user 7');
+    check('session on any guard', json_decode(http('GET', '/auth/any', $cookie)['body'], true)['user'] ?? null, '7');
+    $gone = sessionCookie(http('POST', '/auth/login', ['Content-Type' => 'application/json'], '{"id":"gone"}'));
+    check('session resolver can refuse', http('GET', '/auth/session-resolved', ['Cookie' => "PHPSID=$gone"])['status'], 401);
+
+    $file = $GLOBALS['tmp'] . "/runtime/sessions/session_$sid";
+    touch($file, time() - 100);
+    http('GET', '/auth/session', $cookie);
+    check('activity keeps a session alive', waitFor(function () use ($file) {
+        clearstatcache();
+        return filemtime($file) > time() - 50;
+    }));
+
+    $again = sessionCookie(http('POST', '/auth/login', ['Content-Type' => 'application/json', 'Cookie' => "PHPSID=$sid"], '{"id":"8"}'));
+    check('a second login ends the first session', http('GET', '/auth/session', $cookie)['status'], 401);
+    $cookie = ['Cookie' => "PHPSID=$again"];
+    check('the second login is in the new session', json_decode(http('GET', '/auth/session', $cookie)['body'], true)['user'] ?? null, '8');
+
+    $logout = http('POST', '/auth/logout', $cookie);
+    check('logout expires the cookie', hasHeader($logout, 'Set-Cookie: PHPSID=; Max-Age=0; Path=/'));
+    check('logout answers with the given response', $logout['body'], '{"out":true}');
+    check('logout ends the session', http('GET', '/auth/session', $cookie)['status'], 401);
+    check('logout without a session', http('POST', '/auth/logout')['status'], 200);
+
+    check('any second guard', json_decode(http('GET', '/auth/any', $bearer)['body'], true)['user'] ?? null, 'token user');
+    check('any refused', http('GET', '/auth/any')['status'], 401);
+    check('optional without credentials', json_decode(http('GET', '/auth/open')['body'], true), ['user' => null, 'current' => null]);
+    check('optional with credentials', json_decode(http('GET', '/auth/open', $bearer)['body'], true)['user'] ?? null, 'ana');
+    check('optional() leaves the shared guard strict', http('GET', '/auth/shared')['status'], 401);
+    $custom = http('GET', '/auth/custom');
+    check('onDeny', [$custom['status'], $custom['body'], hasHeader($custom, 'WWW-Authenticate: Bearer')], [401, 'custom', true]);
+    check('onDeny leaves the shared guard alone', http('GET', '/auth/shared')['body'], '{"error":"unauthorized"}');
+
+    check('guard on a prefix refuses', http('GET', '/auth/zone/page')['status'], 401);
+    check('guard on a prefix passes', http('GET', '/auth/zone/page', $bearer)['status'], 200);
+    check('guard on a group refuses', http('GET', '/auth/team/page')['status'], 401);
+    check('guard on a group passes', http('GET', '/auth/team/page', $bearer)['status'], 200);
+
+    [$socket, $head] = openSocket('/auth/socket');
+    check('guard refuses a websocket', substr($head, 9, 3), '401');
+    fclose($socket);
+    [$socket, $head] = openSocket("/auth/socket?token=$token");
+    check('guard passes a websocket', substr($head, 9, 3), '101');
+    check('websocket open sees the user', readFrame($socket), 'hi ana');
+    fclose($socket);
+
+    check('guard refuses a stream', http('GET', '/auth/stream')['status'], 401);
+    $socket = connect();
+    fwrite($socket, "GET /auth/stream?token=$token HTTP/1.1\r\nHost: test\r\n\r\n");
+    readHead($socket);
+    check('stream sees the user', stream_get_contents($socket), "data: ana\n\n");
+    fclose($socket);
+}
+
 function suite(string $title, string $loop, array $tests): void
 {
     global $failures;
@@ -760,13 +1016,15 @@ function suite(string $title, string $loop, array $tests): void
     echo $failures === $before ? "  ok\n" : "  failed\n";
 }
 
-$common = ['routing', 'middleware', 'controllers', 'slimHandlers', 'psr7Http', 'connectionHandling', 'errors', 'statics', 'realtime', 'websockets', 'reloading'];
+$common = ['routing', 'middleware', 'controllers', 'slimHandlers', 'psr7Http', 'authentication', 'connectionHandling', 'errors', 'statics', 'realtime', 'websockets', 'reloading'];
 
 try {
     echo "psr-7 objects\n";
     psr7Objects();
     echo "controllers\n";
     controllerErrors();
+    echo "authentication objects\n";
+    authObjects();
     suite('default event loop', '', $common);
     suite('fiber event loop', 'fiber', [...$common, 'concurrency']);
     echo "watcher\n";

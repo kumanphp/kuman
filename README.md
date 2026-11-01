@@ -127,7 +127,7 @@ fn(Request $req) => Response::file('/path/report.pdf', $req);
 ```
 
 Available on the request: `param()`, `get()`, `post()`, `input()`, `all()`,
-`header()`, `cookie()`, `file()`, `ip()` and `connection`. JSON bodies are parsed
+`header()`, `cookie()`, `file()`, `ip()`, `user()` and `connection`. JSON bodies are parsed
 automatically and read through `post()`. Code that does not receive `$req` can use
 `Request::current()`.
 
@@ -184,6 +184,34 @@ $app->group('/api', $auth, function (App $api) {
 });
 ```
 
+## Authentication
+
+> Every guard and option, with sessions, JWT keys and common mistakes:
+> [docs/auth.md](docs/auth.md).
+
+`Kuman\Auth` builds guards, which are middleware. A guard lets the request through and
+records the user, or answers 401.
+
+```php
+$jwt = new Jwt(getenv('JWT_SECRET'));
+
+$app->use('/admin', Auth::basic(['admin' => $passwordHash]));
+$app->use('/hooks', Auth::apiKey([getenv('PARTNER_KEY') => 'partner']));
+$app->group('/api', Auth::jwt($jwt), function (App $api) {
+    $api->get('/me', fn(Request $req) => $req->user());
+});
+$app->get('/feed', Auth::bearer($findByToken)->optional(), $handler);
+$app->get('/dashboard', Auth::session($loadUser, redirect: '/login'), $handler);
+$app->get('/orders', Auth::any(Auth::session($loadUser), Auth::jwt($jwt)), $handler);
+```
+
+- `Auth::verify($password, $user?->password)` checks a password, and takes the same time
+  when the account does not exist. `Auth::hash()` makes the hash.
+- `$jwt->issue(['sub' => $id])` makes a token. HS, RS and ES algorithms are supported.
+- `Auth::login($req, $id)` starts a session login with a new session id, and
+  `Auth::logout($req, $response)` ends it.
+- Login attempts are not rate limited: put a limiter in front of your login route.
+
 ## PSR-7
 
 `Kuman\Request` implements `Psr\Http\Message\ServerRequestInterface` and
@@ -211,7 +239,8 @@ $app->post('/upload', function (Request $req) {
   `getParsedBody()` and `getUploadedFiles()` after `withParsedBody()` or
   `withUploadedFiles()`. `withBody()` is the exception: it replaces the body for both.
 - `Request::current()` and `$req->connection` belong to the request Kuman received,
-  not to a copy. Call `respond()` on the original or on a copy, both work.
+  not to a copy. The exception is an authentication guard, which makes the copy holding
+  the user the current request. Call `respond()` on the original or on a copy, both work.
 - Response headers are validated: a name with spaces or a value with a line break
   throws `InvalidArgumentException`, which becomes a 500.
 - Request header names come lowercased from Workerman, and repeated headers are

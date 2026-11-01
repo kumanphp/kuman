@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Kuman;
 
 use InvalidArgumentException;
+use Kuman\Auth\Guard;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Message\StreamInterface;
 use Psr\Http\Message\UploadedFileInterface;
@@ -72,6 +73,14 @@ class Request extends BaseRequest implements ServerRequestInterface
     public function ip(): string
     {
         return $this->connection->getRemoteIp();
+    }
+
+    /**
+     * Who a guard let through, null when none did.
+     */
+    public function user(): mixed
+    {
+        return $this->getAttribute(Guard::USER);
     }
 
     /**

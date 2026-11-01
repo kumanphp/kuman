@@ -128,7 +128,7 @@ fn(Request $req) => Response::file('/path/laporan.pdf', $req);
 ```
 
 Yang tersedia di request: `param()`, `get()`, `post()`, `input()`, `all()`,
-`header()`, `cookie()`, `file()`, `ip()`, dan `connection`. Body JSON otomatis
+`header()`, `cookie()`, `file()`, `ip()`, `user()`, dan `connection`. Body JSON otomatis
 terbaca lewat `post()`. Kode yang tidak menerima `$req` bisa memakai
 `Request::current()`.
 
@@ -186,6 +186,34 @@ $app->group('/api', $auth, function (App $api) {
 });
 ```
 
+## Autentikasi
+
+> Semua guard dan opsinya, termasuk session, kunci JWT, dan kesalahan umum:
+> [docs/auth.id.md](docs/auth.id.md).
+
+`Kuman\Auth` membuat guard, yaitu middleware. Guard meloloskan request dan mencatat
+user-nya, atau menjawab 401.
+
+```php
+$jwt = new Jwt(getenv('JWT_SECRET'));
+
+$app->use('/admin', Auth::basic(['admin' => $passwordHash]));
+$app->use('/hooks', Auth::apiKey([getenv('PARTNER_KEY') => 'partner']));
+$app->group('/api', Auth::jwt($jwt), function (App $api) {
+    $api->get('/me', fn(Request $req) => $req->user());
+});
+$app->get('/feed', Auth::bearer($findByToken)->optional(), $handler);
+$app->get('/dashboard', Auth::session($loadUser, redirect: '/login'), $handler);
+$app->get('/orders', Auth::any(Auth::session($loadUser), Auth::jwt($jwt)), $handler);
+```
+
+- `Auth::verify($password, $user?->password)` memeriksa password, dan memakan waktu yang
+  sama saat akunnya tidak ada. `Auth::hash()` membuat hash-nya.
+- `$jwt->issue(['sub' => $id])` membuat token. Algoritma HS, RS, dan ES didukung.
+- `Auth::login($req, $id)` memulai login session dengan session id baru, dan
+  `Auth::logout($req, $response)` mengakhirinya.
+- Percobaan login tidak dibatasi: pasang rate limiter di depan route login Anda.
+
 ## PSR-7
 
 `Kuman\Request` mengimplementasikan `Psr\Http\Message\ServerRequestInterface` dan
@@ -215,7 +243,9 @@ $app->post('/upload', function (Request $req) {
   `withUploadedFiles()`. Pengecualiannya `withBody()`: ia mengganti body untuk
   keduanya.
 - `Request::current()` dan `$req->connection` milik request yang diterima Kuman,
-  bukan salinannya. `respond()` boleh dipanggil dari request asli maupun salinan.
+  bukan salinannya. Pengecualiannya guard autentikasi, yang menjadikan salinan pembawa
+  user sebagai request saat ini. `respond()` boleh dipanggil dari request asli maupun
+  salinan.
 - Header response divalidasi: nama dengan spasi atau nilai dengan baris baru
   melempar `InvalidArgumentException`, yang menjadi 500.
 - Nama header request datang dalam huruf kecil dari Workerman, dan header yang

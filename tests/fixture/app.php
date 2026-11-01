@@ -1,6 +1,8 @@
 <?php
 
 use Kuman\App;
+use Kuman\Auth;
+use Kuman\Auth\Jwt;
 use Kuman\Request;
 use Kuman\Response;
 use Kuman\Sse;
@@ -118,6 +120,51 @@ return function (App $app) {
             'who' => $req->getAttribute('who'),
             'saved' => file_get_contents(__DIR__ . '/uploaded.txt'),
         ];
+    });
+
+    // Authentication: every route answers with who the guard let through.
+    $who = fn(Request $req) => ['user' => $req->user(), 'current' => Request::current()->user()];
+    $token = 'fixture-token-0123456789';
+    $jwt = new Jwt(str_repeat('k', 32), issuer: 'kuman');
+    $users = ['ana' => password_hash('pa:ss', PASSWORD_BCRYPT, ['cost' => 4])];
+
+    $app->get('/auth/basic', Auth::basic($users, 'Say "hi"'), $who);
+    $app->get('/auth/basic-callback', Auth::basic(fn(string $user, string $password) => $user === 'ana' && $password === 'x'), $who);
+    $app->get('/auth/bearer', Auth::bearer([$token => 'ana'], query: 'access_token'), $who);
+    $app->get('/auth/numeric', Auth::bearer(['1234567890123456' => 'ana']), $who);
+    $app->get('/auth/bearer-callback', Auth::bearer(fn(string $given) => $given === 'good' ? ['id' => 1] : false), $who);
+    $app->get('/auth/key', Auth::apiKey([$token => 'ci']), $who);
+    $app->get('/auth/key-named', Auth::apiKey([$token => 'ci'], 'X-Other', 'key'), $who);
+    $app->post('/auth/jwt/login', fn(Request $req) => ['token' => $jwt->issue(['sub' => 'ana'])]);
+    $app->get('/auth/jwt', Auth::jwt($jwt), $who);
+    $app->get('/auth/jwt-resolved', Auth::jwt($jwt, fn(array $claims) => strtoupper($claims['sub'])), $who);
+
+    $app->post('/auth/login', function (Request $req) {
+        Auth::login($req, $req->post('id'));
+        return Response::json(['stored' => is_file(__DIR__ . '/runtime/sessions/session_' . $req->sessionId())])
+            ->withCookie('theme', 'dark');
+    });
+    $app->post('/auth/logout', fn(Request $req) => Auth::logout($req, ['out' => true]));
+    $app->get('/auth/session', Auth::session(), $who);
+    $app->get('/auth/session-page', Auth::session(redirect: '/login'), $who);
+    $app->get('/auth/session-resolved', Auth::session(fn(int|string $id) => $id === 'gone' ? null : "user $id"), $who);
+    $app->get('/auth/any', Auth::any(Auth::session(), Auth::bearer([$token => 'token user'])), $who);
+
+    $shared = Auth::bearer([$token => 'ana']);
+    $app->get('/auth/open', $shared->optional(), $who);
+    $app->get('/auth/shared', $shared, $who);
+    $app->get('/auth/custom', $shared->onDeny(fn(Request $req, Response $default) => $default->withBody(Stream::from('custom'))), $who);
+    $app->use('/auth/zone', $shared);
+    $app->get('/auth/zone/page', $who);
+    $app->group('/auth/team', $shared, function (App $team) use ($who) {
+        $team->get('/page', $who);
+    });
+    $app->ws('/auth/socket', Auth::bearer([$token => 'ana'], query: 'token'), [
+        'open' => fn($conn, Request $req) => $conn->send('hi ' . $req->user()),
+    ]);
+    $app->sse('/auth/stream', Auth::bearer([$token => 'ana'], query: 'token'), function (Request $req, Sse $sse) {
+        $sse->send((string)$req->user());
+        $sse->close();
     });
 
     $app->get('/deferred', function (Request $req) use ($app) {

@@ -122,6 +122,7 @@ $app->get('/files/*', fn(Request $req) => $req->param('wildcard'));   // /files/
 | `$req->respond($value)` | Sends the response later, after the handler returned `null` |
 | `$req->connection` | The Workerman connection |
 | `$req->params` | The route parameters |
+| `$req->user()` | Who an [authentication guard](auth.md) let through, otherwise `null` |
 
 ```php
 $app->get('/slow', function (Request $req) use ($app) {

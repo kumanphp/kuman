@@ -9,6 +9,8 @@ use Workerman\Events\Event;
 use Workerman\Events\Fiber;
 use Workerman\Events\Select;
 use Workerman\Protocols\Http;
+use Workerman\Protocols\Http\Session;
+use Workerman\Protocols\Http\Session\FileSessionHandler;
 use Workerman\Worker;
 
 /**
@@ -61,6 +63,10 @@ final class Server
         if (!is_dir($runtime) && !mkdir($runtime, 0777, true) && !is_dir($runtime)) {
             throw new RuntimeException("Cannot create $runtime");
         }
+        // Session file names are session ids, so only the owner may list them.
+        if (!is_dir("$runtime/sessions") && !mkdir("$runtime/sessions", 0700) && !is_dir("$runtime/sessions")) {
+            throw new RuntimeException("Cannot create $runtime/sessions");
+        }
 
         Worker::$pidFile = "$runtime/kuman.pid";
         Worker::$logFile = "$runtime/kuman.log";
@@ -74,7 +80,8 @@ final class Server
         $worker = new Worker("http://{$config['host']}:{$config['port']}");
         $worker->name = 'kuman';
         $worker->count = $config['workers'];
-        $worker->onWorkerStart = static function (Worker $worker) use ($appFile, $publicPath, $config): void {
+        $worker->onWorkerStart = static function (Worker $worker) use ($appFile, $publicPath, $config, $runtime): void {
+            self::sessions($runtime);
             $define = require $appFile;
             if (!is_callable($define)) {
                 throw new RuntimeException("$appFile must return a callable that receives Kuman\\App");
@@ -227,6 +234,18 @@ final class Server
         $worker->onWorkerStart = static function () use ($basePath, $watch, $config): void {
             (new Monitor($basePath, $config['memory_limit']))->start($watch);
         };
+    }
+
+    /**
+     * Workerman takes its cookie flags from php.ini, where HttpOnly is off, and only keeps a
+     * session alive through writes. app.php runs after this and can change any of it.
+     */
+    private static function sessions(string $runtime): void
+    {
+        Session::handlerClass(FileSessionHandler::class, ['save_path' => "$runtime/sessions"]);
+        Session::$httpOnly = true;
+        Session::$sameSite = 'Lax';
+        Session::$autoUpdateTimestamp = true;
     }
 
     private static function invalidateOpcache(): void

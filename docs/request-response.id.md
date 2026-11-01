@@ -125,6 +125,7 @@ mengisinya.
 | `$req->respond($value)` | Mengirim response belakangan, setelah handler mengembalikan `null` |
 | `$req->connection` | Koneksi Workerman |
 | `$req->params` | Parameter route |
+| `$req->user()` | Siapa yang diloloskan [guard autentikasi](auth.id.md), selain itu `null` |
 
 ```php
 $app->get('/lambat', function (Request $req) use ($app) {
