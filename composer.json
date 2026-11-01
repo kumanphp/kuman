@@ -1,0 +1,40 @@
+{
+  "name": "kuman/kuman",
+  "description": "Long-running PHP microframework on Workerman with Express-style routing.",
+  "type": "library",
+  "license": "MIT",
+  "keywords": [
+    "microframework",
+    "workerman",
+    "long-running",
+    "websocket",
+    "sse"
+  ],
+  "require": {
+    "php": ">=8.2",
+    "ext-json": "*",
+    "ext-pcntl": "*",
+    "ext-posix": "*",
+    "nikic/fast-route": "^1.3",
+    "workerman/coroutine": "^1.1",
+    "workerman/workerman": "^5.2"
+  },
+  "require-dev": {
+    "revolt/event-loop": "^1.0"
+  },
+  "suggest": {
+    "ext-event": "Removes the 1024 connection limit of the select() loop.",
+    "revolt/event-loop": "Required for the fiber event loop."
+  },
+  "autoload": {
+    "psr-4": {
+      "Kuman\\": "src/"
+    }
+  },
+  "bin": [
+    "bin/kuman"
+  ],
+  "scripts": {
+    "test": "php tests/run.php"
+  }
+}

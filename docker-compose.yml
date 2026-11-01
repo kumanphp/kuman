@@ -1,0 +1,12 @@
+services:
+  kuman:
+    build: .
+    container_name: kuman
+    restart: unless-stopped
+    volumes:
+      - "./:/app"
+    ports:
+      - "8642:8642"
+    environment:
+      KUMAN_WATCH: "0"
+    command: ["php", "bin/kuman", "start"]

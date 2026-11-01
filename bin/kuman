@@ -1,0 +1,19 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+$autoload = array_filter([
+    $GLOBALS['_composer_autoload_path'] ?? null,
+    __DIR__ . '/../vendor/autoload.php',
+    __DIR__ . '/../../../autoload.php',
+], 'is_file');
+
+if (!$autoload) {
+    fwrite(STDERR, "Kuman: autoloader not found, run composer install first.\n");
+    exit(1);
+}
+
+require reset($autoload);
+
+Kuman\Server::run((string)getcwd());
