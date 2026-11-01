@@ -125,7 +125,7 @@ mengisinya.
 | `$req->respond($value)` | Mengirim response belakangan, setelah handler mengembalikan `null` |
 | `$req->connection` | Koneksi Workerman |
 | `$req->params` | Parameter route |
-| `$req->user()` | Siapa yang diloloskan [guard autentikasi](auth.id.md), selain itu `null` |
+| `$req->user()` | Siapa yang diloloskan [guard autentikasi](auth.md), selain itu `null` |
 
 ```php
 $app->get('/lambat', function (Request $req) use ($app) {
@@ -365,7 +365,7 @@ Isinya controller, group, middleware, cookie, dan halaman error. Buat proyek dan
 `mkdir storage` di samping `app.php`.
 
 Jalankan dengan satu worker, karena catatan disimpan di memori dan
-[state tidak dibagi antar worker](../README.id.md#hal-yang-perlu-diingat):
+[state tidak dibagi antar worker](README.md#hal-yang-perlu-diingat):
 
 ```bash
 WORKERS=1 vendor/bin/kuman

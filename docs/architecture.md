@@ -63,6 +63,9 @@ Everything is in `src/`, in the `Kuman` namespace.
 working directory is the project root. `runtime/`, `app.php`, `kuman.php` and `public/`
 are all resolved from it.
 
+Documentation lives in `docs/`, with the Indonesian translations in `docs/id/` under the
+same file names. `docs/id/README.md` is the translation of the root `README.md`.
+
 ## Process model
 
 ```

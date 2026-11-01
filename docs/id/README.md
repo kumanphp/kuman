@@ -4,6 +4,8 @@
 
 # Kuman
 
+[English](../../README.md)
+
 Microframework PHP untuk proses long-running, dibangun langsung di atas
 [Workerman](https://github.com/walkor/workerman) dengan routing ala Express.
 Satu file route, tanpa folder `config/`, dan HTTP, WebSocket, serta SSE berjalan
@@ -114,7 +116,7 @@ tengah request. `ws()` tetap menerima callback.
 ## Handler dan response
 
 > Semua method `Request` dan `Response`, dengan contoh dan tutorial langkah demi langkah:
-> [docs/request-response.id.md](docs/request-response.id.md).
+> [request-response.md](request-response.md).
 
 Handler menerima `Kuman\Request` dan **mengembalikan** response:
 
@@ -189,7 +191,7 @@ $app->group('/api', $auth, function (App $api) {
 ## Autentikasi
 
 > Semua guard dan opsinya, termasuk session, kunci JWT, dan kesalahan umum:
-> [docs/auth.id.md](docs/auth.id.md).
+> [auth.md](auth.md).
 
 `Kuman\Auth` membuat guard, yaitu middleware. Guard meloloskan request dan mencatat
 user-nya, atau menjawab 401.

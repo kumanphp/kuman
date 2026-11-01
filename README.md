@@ -4,6 +4,8 @@
 
 # Kuman
 
+[Bahasa Indonesia](docs/id/README.md)
+
 A PHP microframework for long-running processes, built directly on
 [Workerman](https://github.com/walkor/workerman) with Express-style routing.
 One route file, no `config/` folder, and HTTP, WebSocket and SSE all run on a
