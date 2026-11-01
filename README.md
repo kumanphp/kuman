@@ -1,23 +1,23 @@
 <p align="center">
-  <img src="https://image.web.id/images/logo-kuman.png" alt="Logo Kuman" width="160">
+  <img src="https://image.web.id/images/logo-kuman.png" alt="Kuman logo" width="160">
 </p>
 
 # Kuman
 
-Microframework PHP untuk proses long-running, dibangun langsung di atas
-[Workerman](https://github.com/walkor/workerman) dengan routing ala Express.
-Satu file route, tanpa folder `config/`, dan HTTP, WebSocket, serta SSE berjalan
-di satu port.
+A PHP microframework for long-running processes, built directly on
+[Workerman](https://github.com/walkor/workerman) with Express-style routing.
+One route file, no `config/` folder, and HTTP, WebSocket and SSE all run on a
+single port.
 
-Butuh PHP 8.2+ dengan ekstensi `pcntl` dan `posix` (Linux atau macOS).
+Requires PHP 8.2+ with the `pcntl` and `posix` extensions (Linux or macOS).
 
-## Mulai
+## Getting started
 
 ```bash
 composer require kumanphp/kuman
 ```
 
-Buat `app.php`:
+Create `app.php`:
 
 ```php
 <?php
@@ -26,68 +26,69 @@ use Kuman\App;
 use Kuman\Request;
 
 return function (App $app) {
-    $app->get('/', fn() => 'Halo dari Kuman');
+    $app->get('/', fn() => 'Hello from Kuman');
     $app->get('/users/:id', fn(Request $req) => ['id' => $req->param('id')]);
 };
 ```
 
-Jalankan, lalu buka <http://localhost:8642>:
+Run it, then open <http://localhost:8642>:
 
 ```bash
 vendor/bin/kuman
 ```
 
-Saat berjalan di foreground, Kuman me-reload worker otomatis setiap ada file PHP
-yang berubah.
+When running in the foreground, Kuman reloads the workers automatically whenever
+a PHP file changes.
 
 ## Routing
 
 ```php
-$app->get('/users/:id', $handler);          // juga post, put, patch, delete, options
-$app->all('/any', $handler);                // semua method
+$app->get('/users/:id', $handler);          // also post, put, patch, delete, options
+$app->all('/any', $handler);                // any method
 $app->route(['GET', 'POST'], '/form', $handler);
 
-$app->get('/users/:id(\d+)', $handler);     // parameter dengan regex
+$app->get('/users/:id(\d+)', $handler);     // parameter with a regex
 $app->get('/files/*', $handler);            // $req->param('wildcard')
 ```
 
-Daftarkan route statis sebelum route dinamis yang menutupinya, misalnya `/users/me`
-sebelum `/users/:id`. Urutan terbalik membuat worker gagal start dan terus restart,
-dengan pesan error di terminal atau di `runtime/kuman.log`.
+Register static routes before the dynamic routes that would shadow them, for
+example `/users/me` before `/users/:id`. The reverse order makes the worker fail
+to start and restart in a loop, with the error shown in the terminal or in
+`runtime/kuman.log`.
 
-## Handler dan response
+## Handlers and responses
 
-Handler menerima `Kuman\Request` dan **mengembalikan** response:
+A handler receives a `Kuman\Request` and **returns** a response:
 
 ```php
-fn() => 'teks';                        // HTML
+fn() => 'text';                        // HTML
 fn() => ['ok' => true];                // JSON
 fn() => Response::json($data, 201);
-fn() => Response::text('teks', 400);
+fn() => Response::text('text', 400);
 fn() => Response::redirect('/login');
-fn(Request $req) => Response::file('/path/laporan.pdf', $req);
+fn(Request $req) => Response::file('/path/report.pdf', $req);
 ```
 
-Yang tersedia di request: `param()`, `get()`, `post()`, `input()`, `all()`,
-`header()`, `cookie()`, `file()`, `ip()`, dan `connection`. Body JSON otomatis
-terbaca lewat `post()`. Kode yang tidak menerima `$req` bisa memakai
+Available on the request: `param()`, `get()`, `post()`, `input()`, `all()`,
+`header()`, `cookie()`, `file()`, `ip()` and `connection`. JSON bodies are parsed
+automatically and read through `post()`. Code that does not receive `$req` can use
 `Request::current()`.
 
-`null` berarti handler memegang koneksi dan akan menjawab nanti. Handler yang lupa
-`return` membuat klien menunggu terus.
+`null` means the handler keeps the connection and will answer later. A handler
+that forgets to `return` leaves the client waiting forever.
 
 ```php
-$app->get('/lambat', function (Request $req) use ($app) {
-    $app->after(2, fn() => $req->respond(['selesai' => true]));
+$app->get('/slow', function (Request $req) use ($app) {
+    $app->after(2, fn() => $req->respond(['done' => true]));
     return null;
 });
 ```
 
 ## Middleware
 
-Middleware menerima request dan `$next`. `$next` selalu mengembalikan response,
-atau `null` untuk koneksi yang dipegang handler (WebSocket, SSE, respons tertunda).
-Karena itu pakai `?->` saat mengubah hasilnya.
+Middleware receives the request and `$next`. `$next` always returns a response,
+or `null` for a connection held by the handler (WebSocket, SSE, deferred
+response). Use `?->` when modifying the result.
 
 ```php
 $logger = function (Request $req, callable $next) {
@@ -96,13 +97,13 @@ $logger = function (Request $req, callable $next) {
     return $res?->header('X-Time', (string)(microtime(true) - $start));
 };
 
-$auth = fn(Request $req, callable $next) => $req->header('x-token') === 'rahasia'
+$auth = fn(Request $req, callable $next) => $req->header('x-token') === 'secret'
     ? $next($req)
     : Response::json(['error' => 'unauthorized'], 401);
 
-$app->use($logger);                     // semua request, termasuk 404
-$app->use('/admin', $auth);             // satu prefix path
-$app->get('/me', $auth, $handler);      // satu route
+$app->use($logger);                     // every request, including 404s
+$app->use('/admin', $auth);             // one path prefix
+$app->get('/me', $auth, $handler);      // one route
 
 $app->group('/api', $auth, function (App $api) {
     $api->get('/orders', fn() => []);
@@ -113,117 +114,121 @@ $app->group('/api', $auth, function (App $api) {
 
 ```php
 $app->ws('/chat', [
-    'open' => fn($conn, Request $req) => $conn->send('halo'),
+    'open' => fn($conn, Request $req) => $conn->send('hello'),
     'message' => fn($conn, string $data) => $conn->send($data),
     'close' => fn($conn) => null,
 ]);
 
-$app->ws('/private', $auth, ['message' => $onMessage]);   // middleware menjaga upgrade
+$app->ws('/private', $auth, ['message' => $onMessage]);   // middleware guards the upgrade
 ```
 
 ## Server-Sent Events
 
-Timer dari `$sse->every()` berhenti otomatis saat klien terputus.
+Timers created with `$sse->every()` stop automatically when the client
+disconnects.
 
 ```php
 $app->sse('/time', function (Request $req, Sse $sse) {
-    $sse->send('tersambung', event: 'hello');
+    $sse->send('connected', event: 'hello');
     $sse->every(1, fn() => $sse->send(['time' => date('c')]));
     $sse->onClose(fn() => null);
 });
 ```
 
-## Timer dan state
+## Timers and state
 
-Closure di `app.php` dijalankan sekali per worker setelah fork, jadi tempat yang
-tepat untuk membuka koneksi database dan menyimpan state. Nilainya bertahan antar
-request, tapi hanya di worker itu.
+The closure in `app.php` runs once per worker after the fork, which makes it the
+right place to open database connections and keep state. Values persist across
+requests, but only within that worker.
 
 ```php
 return function (App $app) {
-    $db = new PDO($dsn);        // satu koneksi per worker
+    $db = new PDO($dsn);        // one connection per worker
 
-    $app->every(60, fn() => $db->query('SELECT 1'));   // hanya di worker pertama
+    $app->every(60, fn() => $db->query('SELECT 1'));   // first worker only
 };
 ```
 
-Exception di request dan callback bawaan Kuman dicatat tanpa mematikan worker.
-Bungkus callback lain, misalnya `Timer::add()` langsung, dengan `$app->guard($fn)`.
-Tampilan error bisa diganti dengan `$app->onError()` dan `$app->notFound()`.
+Exceptions in requests and in Kuman's own callbacks are logged without killing the
+worker. Wrap any other callback, such as a direct `Timer::add()`, with
+`$app->guard($fn)`. Error pages can be replaced with `$app->onError()` and
+`$app->notFound()`.
 
-## File statis
+## Static files
 
-File di `public/` disajikan otomatis saat tidak ada route yang cocok, lengkap
-dengan `Range` dan `If-Modified-Since`. File `.php` dan dotfile tidak pernah
-disajikan, kecuali `.well-known/`.
+Files in `public/` are served automatically when no route matches, with support
+for `Range` and `If-Modified-Since`. `.php` files and dotfiles are never served,
+except for `.well-known/`.
 
-## Konfigurasi
+## Configuration
 
-Default sudah cukup untuk mulai. Urutan prioritas, dari terlemah: `kuman.php`, env,
-lalu flag.
+The defaults are enough to get started. Precedence, from lowest to highest:
+`kuman.php`, environment variables, then flags.
 
-| Pengaturan | Flag | Env | Default |
+| Setting | Flag | Env | Default |
 |---|---|---|---|
 | Port | `--port` | `PORT` | `8642` |
-| Alamat | `--host` | `KUMAN_HOST` | `0.0.0.0` |
-| Jumlah worker | `--workers` | `WORKERS` | jumlah CPU |
-| Event loop | `--loop` | `KUMAN_LOOP` | otomatis |
-| Detail error di response | `--debug` | `KUMAN_DEBUG` | mati |
-| Reload otomatis | | `KUMAN_WATCH` | aktif di foreground |
-| File aplikasi | `--app` | | `app.php` |
+| Host | `--host` | `KUMAN_HOST` | `0.0.0.0` |
+| Worker count | `--workers` | `WORKERS` | CPU count |
+| Event loop | `--loop` | `KUMAN_LOOP` | automatic |
+| Error details in responses | `--debug` | `KUMAN_DEBUG` | off |
+| Automatic reload | | `KUMAN_WATCH` | on in the foreground |
+| Application file | `--app` | | `app.php` |
 
-`kuman.php` bersifat opsional, dan diperlukan untuk proses tambahan:
+`kuman.php` is optional, and is needed for additional processes:
 
 ```php
 <?php
 
 return [
     'port' => 8642,
-    'memory_limit' => 256,      // MB, worker di atas batas ini didaur ulang
+    'memory_limit' => 256,      // MB, workers above this limit are recycled
     'processes' => [
         'queue' => ['handler' => App\QueueWorker::class, 'count' => 2],
     ],
 ];
 ```
 
-Handler adalah nama class yang dibuat setelah fork, dan boleh punya method
-`onWorkerStart`, `onMessage`, `onClose`, serta callback Workerman lainnya. Isi
-`listen` jika proses perlu membuka port sendiri. Perubahan pada `kuman.php` butuh
-`kuman restart`.
+A handler is a class name that is instantiated after the fork, and may define
+`onWorkerStart`, `onMessage`, `onClose` and other Workerman callbacks. Set
+`listen` if the process needs to open its own port. Changes to `kuman.php`
+require `kuman restart`.
 
-## Perintah
+## Commands
 
 ```bash
-vendor/bin/kuman              # start di foreground
+vendor/bin/kuman              # start in the foreground
 vendor/bin/kuman start -d     # daemon
-vendor/bin/kuman reload       # muat ulang kode
+vendor/bin/kuman reload       # reload code
 vendor/bin/kuman stop
 vendor/bin/kuman status
 vendor/bin/kuman connections
 ```
 
-## Hal yang perlu diingat
+## Things to keep in mind
 
-Kuman menjalankan kode di proses yang terus hidup, berbeda dari PHP-FPM.
+Kuman runs your code in a process that stays alive, unlike PHP-FPM.
 
-- **Kode blocking menahan worker.** Query PDO atau `sleep()` membuat satu worker
-  melayani satu request pada satu waktu, jadi `WORKERS` adalah kapasitas utama.
-- **Fiber hanya membantu kode async.** `--loop=fiber` butuh `revolt/event-loop` dan
-  membuat `Timer::sleep()` tidak memblokir, tapi tidak mengubah PDO atau curl biasa.
-- **State tidak dibagi antar worker.** Broadcast WebSocket ke semua worker butuh
-  pub/sub seperti Redis.
-- **Reload memutus koneksi panjang.** Klien WebSocket dan SSE harus reconnect.
-- **Pasang `ext-event` di produksi.** Tanpanya loop `select()` dibatasi 1024 koneksi.
-- **`exit()` dan `die()` mengakhiri worker,** bukan hanya request.
+- **Blocking code holds the worker.** A PDO query or `sleep()` means one worker
+  serves one request at a time, so `WORKERS` is your main capacity.
+- **Fibers only help async code.** `--loop=fiber` needs `revolt/event-loop` and
+  makes `Timer::sleep()` non-blocking, but it does not change plain PDO or curl.
+- **State is not shared between workers.** Broadcasting WebSocket messages to all
+  workers needs pub/sub such as Redis.
+- **Reloading drops long-lived connections.** WebSocket and SSE clients must
+  reconnect.
+- **Install `ext-event` in production.** Without it the `select()` loop is limited
+  to 1024 connections.
+- **`exit()` and `die()` end the worker,** not just the request.
 
-## Tes
+## Tests
 
 ```bash
 composer test
 ```
 
-Tes menjalankan server sungguhan di port 18642, pada loop default dan fiber.
+The tests start a real server on port 18642, on both the default and fiber loops.
 
-## Lisensi
+## License
 
-MIT. Sebagian kode diadaptasi dari [webman](https://github.com/walkor/webman).
+MIT. Some code is adapted from [webman](https://github.com/walkor/webman).
