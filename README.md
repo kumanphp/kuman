@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://image.web.id/images/logo-kuman.png" alt="Logo Kuman" width="160">
+</p>
+
 # Kuman
 
 Microframework PHP untuk proses long-running, dibangun langsung di atas
