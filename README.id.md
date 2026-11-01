@@ -67,7 +67,54 @@ Daftarkan route statis sebelum route dinamis yang menutupinya, misalnya `/users/
 sebelum `/users/:id`. Urutan terbalik membuat worker gagal start dan terus restart,
 dengan pesan error di terminal atau di `runtime/kuman.log`.
 
+Kelompokkan route dengan prefix. Argumen terakhir mendefinisikan route, argumen
+sebelumnya adalah middleware untuk seluruh grup. Grup boleh bersarang, dan `use()` di
+dalam grup berlaku untuk route yang didefinisikan sesudahnya di grup itu.
+
+```php
+$app->group('/api', $auth, function (App $api) {
+    $api->get('/orders', $handler);                  // GET /api/orders
+    $api->group('/v1', function (App $v1) {
+        $v1->get('/orders', $handler);               // GET /api/v1/orders
+    });
+});
+```
+
+### Controller
+
+Handler boleh berupa method controller, atau kelas invokable. Argumen sebelum handler
+terakhir pada sebuah route adalah middleware route, dan itu juga boleh method
+controller.
+
+```php
+$app->get('/users/:id', [UserController::class, 'show']);
+$app->post('/users', [UserController::class, 'create']);
+$app->get('/health', HealthController::class);       // punya __invoke()
+
+$app->group('/admin', $auth, function (App $admin) {
+    $admin->get('/users/:id', [UserController::class, 'show']);
+});
+
+class UserController
+{
+    public function show(Request $req)
+    {
+        return ['id' => $req->param('id')];          // mengembalikan seperti handler biasa
+    }
+}
+```
+
+Kuman membuat controller **untuk setiap request**, jadi properti tidak membawa data dari
+satu request ke request berikutnya. Constructor controller tidak boleh punya argumen
+wajib; untuk kebutuhan lain berikan instance, `[$controller, 'show']`, dan instance itu
+menyimpan state-nya. Kelas atau method yang tidak ada, atau method private,
+menghentikan worker saat start seperti kesalahan routing, bukan gagal belakangan di
+tengah request. `ws()` tetap menerima callback.
+
 ## Handler dan response
+
+> Semua method `Request` dan `Response`, dengan contoh dan tutorial langkah demi langkah:
+> [docs/request-response.id.md](docs/request-response.id.md).
 
 Handler menerima `Kuman\Request` dan **mengembalikan** response:
 
@@ -84,6 +131,24 @@ Yang tersedia di request: `param()`, `get()`, `post()`, `input()`, `all()`,
 `header()`, `cookie()`, `file()`, `ip()`, dan `connection`. Body JSON otomatis
 terbaca lewat `post()`. Kode yang tidak menerima `$req` bisa memakai
 `Request::current()`.
+
+Handler yang mendeklarasikan parameter kedua juga menerima `Response` kosong untuk
+diisi dan parameter route, seperti di Slim:
+
+```php
+$app->get('/hello/{name}', function ($request, $response, array $args) {
+    $response->getBody()->write("Halo, {$args['name']}");
+    return $response->withStatus(201);
+});
+```
+
+`{name}` dan `:name` sama saja, dan `$args` adalah `$req->params`. Tulis ke body
+sebelum membuat salinan dengan `withStatus()` atau `withHeader()`, atau kembalikan
+salinan yang Anda tulisi. Handler dengan satu parameter, atau tanpa parameter,
+dipanggil seperti sebelumnya. Hanya handler terakhir sebuah route yang mendapat ini;
+middleware route tetap `($request, $next)`. Seperti biasa, handler harus
+**mengembalikan** response: tanpa `return`, Kuman menunggu `respond()` yang datang
+belakangan.
 
 `null` berarti handler memegang koneksi dan akan menjawab nanti. Handler yang lupa
 `return` membuat klien menunggu terus.

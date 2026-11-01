@@ -68,7 +68,52 @@ example `/users/me` before `/users/:id`. The reverse order makes the worker fail
 to start and restart in a loop, with the error shown in the terminal or in
 `runtime/kuman.log`.
 
+Group routes under a prefix. The last argument defines the routes, the ones before it
+are middleware for the whole group. Groups nest, and `use()` inside a group applies to
+the routes defined after it in that group.
+
+```php
+$app->group('/api', $auth, function (App $api) {
+    $api->get('/orders', $handler);                  // GET /api/orders
+    $api->group('/v1', function (App $v1) {
+        $v1->get('/orders', $handler);               // GET /api/v1/orders
+    });
+});
+```
+
+### Controllers
+
+A handler can be a controller method, or an invokable class. Anything before the last
+handler of a route is route middleware, and it can be a controller method too.
+
+```php
+$app->get('/users/:id', [UserController::class, 'show']);
+$app->post('/users', [UserController::class, 'create']);
+$app->get('/health', HealthController::class);       // has __invoke()
+
+$app->group('/admin', $auth, function (App $admin) {
+    $admin->get('/users/:id', [UserController::class, 'show']);
+});
+
+class UserController
+{
+    public function show(Request $req)
+    {
+        return ['id' => $req->param('id')];          // returns like any handler
+    }
+}
+```
+
+Kuman creates the controller **for each request**, so a property never carries data from
+one request to the next. A controller needs a constructor without required arguments;
+for anything else pass an instance, `[$controller, 'show']`, and it keeps its state.
+A missing class or method, or a private method, stops the worker at start, like a
+routing mistake, and does not fail later in a request. `ws()` still takes callbacks.
+
 ## Handlers and responses
+
+> Every method of `Request` and `Response`, with examples and a step-by-step tutorial:
+> [docs/request-response.md](docs/request-response.md).
 
 A handler receives a `Kuman\Request` and **returns** a response:
 
@@ -85,6 +130,23 @@ Available on the request: `param()`, `get()`, `post()`, `input()`, `all()`,
 `header()`, `cookie()`, `file()`, `ip()` and `connection`. JSON bodies are parsed
 automatically and read through `post()`. Code that does not receive `$req` can use
 `Request::current()`.
+
+A handler that declares a second parameter also receives an empty `Response` to fill
+and the route parameters, as in Slim:
+
+```php
+$app->get('/hello/{name}', function ($request, $response, array $args) {
+    $response->getBody()->write("Hello, {$args['name']}");
+    return $response->withStatus(201);
+});
+```
+
+`{name}` and `:name` are the same, and `$args` is `$req->params`. Write to the body
+before you derive a copy with `withStatus()` or `withHeader()`, or return the copy you
+wrote to. A handler with one parameter, or none, is called as before. Only the last
+handler of a route gets this; route middleware keeps `($request, $next)`. As always, the
+handler must **return** the response: without a `return`, Kuman waits for a later
+`respond()`.
 
 `null` means the handler keeps the connection and will answer later. A handler
 that forgets to `return` leaves the client waiting forever.

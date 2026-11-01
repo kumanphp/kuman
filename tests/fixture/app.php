@@ -9,6 +9,7 @@ use Workerman\Protocols\Http\Chunk;
 use Workerman\Timer;
 
 require_once __DIR__ . '/ForeignResponse.php';
+require_once __DIR__ . '/Controllers.php';
 
 return function (App $app) {
     $ticks = 0;
@@ -46,6 +47,29 @@ return function (App $app) {
         });
     });
     $app->get('/outside', fn() => 'outside');
+
+    $app->get('/controller/users/mine', [Fixture\UserController::class, 'mine']);
+    $app->get('/controller/users/:id', [Fixture\UserController::class, 'show']);
+    $app->post('/controller/users', [Fixture\UserController::class, 'create']);
+    $app->get('/controller/health', Fixture\HealthController::class);
+    $app->get('/controller/instance/:id', [new Fixture\UserController(), 'show']);
+    $app->get('/controller/gated/:id', [Fixture\UserController::class, 'gate'], [Fixture\UserController::class, 'show']);
+    $app->group('/controller/admin', $tag('Group'), function (App $admin) {
+        $admin->get('/users/:id', [Fixture\UserController::class, 'show']);
+    });
+
+    // Slim-style handlers: ($request, $response, array $args)
+    $app->get('/slim/hello/{name}', function ($request, $response, array $args) {
+        $response->getBody()->write("Hello, {$args['name']}");
+        return $response->withStatus(201)->withHeader('X-Method', $request->getMethod());
+    });
+    $app->get('/slim/mixed/:a/{b}', fn($request, $response, array $args) => $args);
+    $app->get('/slim/all/:id', fn(...$all) => ['count' => count($all), 'second' => $all[1] instanceof Response, 'third' => $all[2]]);
+    $app->get('/slim/one/:id', fn(Request $req) => ['id' => $req->param('id')]);
+    $app->get('/slim/controller/:id', [Fixture\UserController::class, 'profile']);
+    $app->get('/slim/gated/:id', [Fixture\UserController::class, 'gate'], function ($request, $response, array $args) {
+        return $response->withHeader('X-Id', $args['id']);
+    });
 
     // PSR-7: middleware replaces the request with copies, handlers read it through the interface.
     $app->use('/psr', static fn(Request $req, callable $next) => $next($req->withAttribute('who', 'middleware')));

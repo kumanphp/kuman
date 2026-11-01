@@ -7,6 +7,9 @@ namespace Kuman;
 use ArrayObject;
 use Closure;
 use FastRoute\Dispatcher;
+use InvalidArgumentException;
+use ReflectionFunction;
+use ReflectionMethod;
 use stdClass;
 use Throwable;
 use Workerman\Connection\TcpConnection;
@@ -47,49 +50,55 @@ class App
         $this->router = new Router();
     }
 
-    public function get(string $path, callable ...$handlers): static
+    public function get(string $path, callable|array|string ...$handlers): static
     {
         return $this->route(['GET'], $path, ...$handlers);
     }
 
-    public function post(string $path, callable ...$handlers): static
+    public function post(string $path, callable|array|string ...$handlers): static
     {
         return $this->route(['POST'], $path, ...$handlers);
     }
 
-    public function put(string $path, callable ...$handlers): static
+    public function put(string $path, callable|array|string ...$handlers): static
     {
         return $this->route(['PUT'], $path, ...$handlers);
     }
 
-    public function patch(string $path, callable ...$handlers): static
+    public function patch(string $path, callable|array|string ...$handlers): static
     {
         return $this->route(['PATCH'], $path, ...$handlers);
     }
 
-    public function delete(string $path, callable ...$handlers): static
+    public function delete(string $path, callable|array|string ...$handlers): static
     {
         return $this->route(['DELETE'], $path, ...$handlers);
     }
 
-    public function options(string $path, callable ...$handlers): static
+    public function options(string $path, callable|array|string ...$handlers): static
     {
         return $this->route(['OPTIONS'], $path, ...$handlers);
     }
 
-    public function all(string $path, callable ...$handlers): static
+    public function all(string $path, callable|array|string ...$handlers): static
     {
         return $this->route(['*'], $path, ...$handlers);
     }
 
     /**
      * The last handler answers the request, the ones before it are route middleware.
+     * A handler is a callable, an invokable class name, or [Controller::class, 'method']:
+     * the controller is created for each request. An answering handler that declares a
+     * second parameter also receives a response to fill and the route parameters:
+     * fn($request, $response, array $args).
      *
      * @param array<int, string> $methods
      */
-    public function route(array $methods, string $path, callable ...$handlers): static
+    public function route(array $methods, string $path, callable|array|string ...$handlers): static
     {
-        $handler = array_pop($handlers);
+        $last = array_pop($handlers);
+        $handlers = array_map(self::resolve(...), $handlers);
+        $handler = self::answer($last);
         $this->router->add($methods, $this->prefix . $path, self::pipe([...$this->scope, ...$handlers], $handler));
         return $this;
     }
@@ -174,8 +183,9 @@ class App
     /**
      * Server-Sent Events: the last handler receives the request and a Kuman\Sse stream.
      */
-    public function sse(string $path, callable ...$handlers): static
+    public function sse(string $path, callable|array|string ...$handlers): static
     {
+        $handlers = array_map(self::resolve(...), $handlers);
         $handler = array_pop($handlers);
         return $this->route(['GET'], $path, ...[...$handlers, function (Request $request) use ($handler) {
             $connection = $request->connection;
@@ -383,6 +393,47 @@ class App
             static fn(callable $next, callable $layer) => $normalize(static fn(Request $request) => $layer($request, $next)),
             $normalize($handler)
         );
+    }
+
+    private static function answer(callable|array|string $handler): callable
+    {
+        $callable = self::resolve($handler);
+        if (!self::wantsResponse($handler)) {
+            return $callable;
+        }
+        return static fn(Request $request) => $callable($request, new Response(body: Stream::from()), $request->params);
+    }
+
+    private static function wantsResponse(callable|array|string $handler): bool
+    {
+        $function = match (true) {
+            is_callable($handler) => new ReflectionFunction(Closure::fromCallable($handler)),
+            is_array($handler) => new ReflectionMethod($handler[0], $handler[1]),
+            default => new ReflectionMethod($handler, '__invoke'),
+        };
+        return $function->getNumberOfParameters() > 1 || $function->isVariadic();
+    }
+
+    /**
+     * Turn [Controller::class, 'method'] and invokable class names into callables. Checked
+     * when the route is defined, so a typo stops the worker at start instead of failing a request.
+     */
+    private static function resolve(callable|array|string $handler): callable
+    {
+        if (is_callable($handler)) {
+            return $handler;
+        }
+
+        [$class, $method] = is_array($handler) ? [$handler[0] ?? null, $handler[1] ?? null] : [$handler, '__invoke'];
+        if (!is_string($class) || !is_string($method) || !class_exists($class)) {
+            throw new InvalidArgumentException('Route handler must be a callable, an invokable class or [Controller::class, \'method\'].');
+        }
+        if (!method_exists($class, $method) || !(new ReflectionMethod($class, $method))->isPublic()) {
+            throw new InvalidArgumentException("$class has no public method $method().");
+        }
+
+        // A new controller per request: the worker serves many requests, and state must not leak between them.
+        return static fn(mixed ...$args) => (new $class())->$method(...$args);
     }
 
     private static function under(string $prefix, callable $middleware): Closure

@@ -539,6 +539,11 @@ function psr7Objects(): void
     check('file keeps its headers', $served->withHeader('X-A', 'b')->toWorkerman()->file !== null);
     check('withBody replaces the file', $served->withBody(Kuman\Stream::from('x'))->toWorkerman()->file, null);
     check('missing file', Kuman\Response::file("$file.nothing")->getStatusCode(), 404);
+    $warnings = 0;
+    set_error_handler(function () use (&$warnings) { $warnings++; return true; });
+    $missing = Kuman\Response::file("$file.nothing", new Kuman\Request("GET /f HTTP/1.1\r\nHost: t\r\n\r\n"));
+    restore_error_handler();
+    check('missing file for a request', [$missing->getStatusCode(), $warnings], [404, 0]);
 
     $raw = "POST /a/b?x=1&y[]=2 HTTP/1.1\r\nHost: Example.com:8080\r\nContent-Type: application/json\r\nX-Agent: one\r\nContent-Length: 7\r\n\r\n{\"k\":1}";
     $request = new Kuman\Request($raw);
@@ -635,6 +640,52 @@ function psr7Objects(): void
     check('the request deletes its upload', is_file($path), false);
 }
 
+function controllers(): void
+{
+    check('controller method', http('GET', '/controller/users/7')['body'], '{"id":"7","calls":1}');
+    check('controller is created per request', http('GET', '/controller/users/7')['body'], '{"id":"7","calls":1}');
+    check('static route before the dynamic one', http('GET', '/controller/users/mine')['body'], 'mine');
+    $created = http('POST', '/controller/users', ['Content-Type' => 'application/json'], '{"name":"ana"}');
+    check('controller returns a response', [$created['status'], $created['body']], [201, '{"created":"ana"}']);
+    check('invokable controller', http('GET', '/controller/health')['body'], '{"ok":true}');
+    check('an instance keeps its state', [
+        http('GET', '/controller/instance/1')['body'],
+        http('GET', '/controller/instance/1')['body'],
+    ], ['{"id":"1","calls":1}', '{"id":"1","calls":2}']);
+    check('controller as route middleware stops', http('GET', '/controller/gated/3')['status'], 403);
+    check('controller as route middleware passes', http('GET', '/controller/gated/3', ['X-Pass' => 'yes'])['body'], '{"id":"3","calls":1}');
+
+    $grouped = http('GET', '/controller/admin/users/5');
+    check('controller in a group', $grouped['body'], '{"id":"5","calls":1}');
+    check('controller in a group gets its middleware', hasHeader($grouped, 'X-Group: yes'));
+}
+
+function slimHandlers(): void
+{
+    $hello = http('GET', '/slim/hello/Ana%20B');
+    check('slim handler', [$hello['status'], $hello['body'], hasHeader($hello, 'X-Method: GET')], [201, 'Hello, Ana B', true]);
+    check('slim args take both syntaxes', http('GET', '/slim/mixed/x/y')['body'], '{"a":"x","b":"y"}');
+    check('variadic handler gets all three', http('GET', '/slim/all/9')['body'], '{"count":3,"second":true,"third":{"id":"9"}}');
+    check('one parameter handler is unchanged', http('GET', '/slim/one/4')['body'], '{"id":"4"}');
+    $profile = http('GET', '/slim/controller/8');
+    check('slim controller', [$profile['status'], $profile['body']], [202, 'profile 8']);
+    check('slim handler behind route middleware', hasHeader(http('GET', '/slim/gated/2', ['X-Pass' => 'yes']), 'X-Id: 2'));
+    check('slim handler is not reached when middleware stops', http('GET', '/slim/gated/2')['status'], 403);
+}
+
+function controllerErrors(): void
+{
+    require_once dirname(__DIR__) . '/tests/fixture/Controllers.php';
+    $define = fn(mixed $handler) => fn() => (new Kuman\App())->get('/x', $handler);
+    check('unknown class', throws($define([Fixture\Missing::class, 'run']), InvalidArgumentException::class));
+    check('unknown method', throws($define([Fixture\UserController::class, 'nothing']), InvalidArgumentException::class));
+    check('private method', throws($define([Fixture\UserController::class, 'hidden']), InvalidArgumentException::class));
+    check('class without __invoke', throws($define(Fixture\UserController::class), InvalidArgumentException::class));
+    check('not a handler', throws($define(['nothing']), InvalidArgumentException::class));
+    check('valid controller', throws($define([Fixture\UserController::class, 'show'])), false);
+    check('sse takes a controller too', throws(fn() => (new Kuman\App())->sse('/s', Fixture\HealthController::class)), false);
+}
+
 function psr7Http(): void
 {
     $response = http('POST', '/psr/info?a=1&b[]=2', ['Content-Type' => 'application/json', 'X-Agent' => 'curl', 'Cookie' => 's=1'], '{"k":[1,2]}');
@@ -709,11 +760,13 @@ function suite(string $title, string $loop, array $tests): void
     echo $failures === $before ? "  ok\n" : "  failed\n";
 }
 
-$common = ['routing', 'middleware', 'psr7Http', 'connectionHandling', 'errors', 'statics', 'realtime', 'websockets', 'reloading'];
+$common = ['routing', 'middleware', 'controllers', 'slimHandlers', 'psr7Http', 'connectionHandling', 'errors', 'statics', 'realtime', 'websockets', 'reloading'];
 
 try {
     echo "psr-7 objects\n";
     psr7Objects();
+    echo "controllers\n";
+    controllerErrors();
     suite('default event loop', '', $common);
     suite('fiber event loop', 'fiber', [...$common, 'concurrency']);
     echo "watcher\n";

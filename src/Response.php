@@ -87,7 +87,7 @@ class Response implements ResponseInterface
     public static function file(string $path, ?Request $request = null): static
     {
         $response = new static();
-        if ($request === null) {
+        if ($request === null || !is_file($path)) {
             return $response->withFile($path);
         }
 
