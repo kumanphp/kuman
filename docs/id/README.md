@@ -107,9 +107,9 @@ class UserController
 ```
 
 Kuman membuat controller **untuk setiap request**, jadi properti tidak membawa data dari
-satu request ke request berikutnya. Constructor controller tidak boleh punya argumen
-wajib; untuk kebutuhan lain berikan instance, `[$controller, 'show']`, dan instance itu
-menyimpan state-nya. Kelas atau method yang tidak ada, atau method private,
+satu request ke request berikutnya. Parameter constructor-nya di-inject seperti parameter
+handler (lihat [Validasi dan injeksi](#validasi-dan-injeksi)); instance yang dikirim
+langsung, `[$controller, 'show']`, menyimpan state-nya. Kelas atau method yang tidak ada, atau method private,
 menghentikan worker saat start seperti kesalahan routing, bukan gagal belakangan di
 tengah request. `ws()` tetap menerima callback.
 
@@ -215,6 +215,53 @@ $app->get('/orders', Auth::any(Auth::session($loadUser), Auth::jwt($jwt)), $hand
 - `Auth::login($req, $id)` memulai login session dengan session id baru, dan
   `Auth::logout($req, $response)` mengakhirinya.
 - Percobaan login tidak dibatasi: pasang rate limiter di depan route login Anda.
+
+## Validasi dan injeksi
+
+> Tipe, rule, sumber data, dan format error: [validation.md](validation.md).
+> Layanan, nilai per request, dan `#[Depends]`: [injection.md](injection.md).
+
+Handler bisa mendeklarasikan kebutuhannya lewat parameter bertipe. **Dto** diisi dari
+request dan divalidasi sebelum handler berjalan; input yang salah dijawab 422 berisi semua
+masalahnya, dan handler tidak dijalankan.
+
+```php
+use Kuman\Validation\Attributes\{Email, MinLength};
+use Kuman\Validation\Dto;
+
+class CreateUser implements Dto
+{
+    #[Email]
+    public string $email;
+
+    #[MinLength(8)]
+    public string $password;
+
+    public int $age = 18;
+}
+
+return function (App $app) {
+    $app->provide(PDO::class, new PDO($dsn));      // satu per worker
+
+    $app->post('/users', fn(CreateUser $user, PDO $db) => createUser($db, $user));
+    $app->get('/users/:id', fn(int $id, PDO $db) => findUser($db, $id));
+};
+```
+
+Kuman menentukan asal setiap parameter saat worker start, jadi parameter yang tidak bisa
+dipenuhi menghentikan worker di situ. Handler dengan bentuk biasa, `fn(Request $req)` dan
+`fn($request, $response, array $args)`, dipanggil seperti sebelumnya.
+
+## Dokumentasi API
+
+> Attribute, respons, dan security scheme: [openapi.md](openapi.md).
+
+```php
+$app->enableDocs(title: 'Orders API', version: '1.0.0');   // /docs dan /openapi.json
+```
+
+Dokumen OpenAPI 3.1 dibaca dari route, kelas Dto, dan guard. Docs nonaktif sampai
+diaktifkan; di luar development, pasang guard lewat `middleware:`.
 
 ## PSR-7
 

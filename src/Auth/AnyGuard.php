@@ -36,6 +36,11 @@ class AnyGuard extends Guard
         return null;
     }
 
+    public function security(): array
+    {
+        return array_merge(...array_map(static fn(Guard $guard) => $guard->security(), $this->guards));
+    }
+
     protected function challenge(Request $request): Response
     {
         return Response::from($this->guards[0]->deny($request));

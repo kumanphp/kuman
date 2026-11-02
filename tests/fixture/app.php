@@ -1,17 +1,29 @@
 <?php
 
+use Kuman\Abort;
 use Kuman\App;
+use Kuman\Attributes\Body;
+use Kuman\Attributes\Cookie;
+use Kuman\Attributes\Depends;
+use Kuman\Attributes\Header;
+use Kuman\Attributes\Hidden;
+use Kuman\Attributes\Query;
+use Kuman\Attributes\Summary;
+use Kuman\Attributes\Tag;
 use Kuman\Auth;
 use Kuman\Auth\Jwt;
 use Kuman\Request;
 use Kuman\Response;
 use Kuman\Sse;
 use Kuman\Stream;
+use Kuman\Validation\Attributes\Min;
+use Kuman\Validation\Invalid;
 use Workerman\Protocols\Http\Chunk;
 use Workerman\Timer;
 
 require_once __DIR__ . '/ForeignResponse.php';
 require_once __DIR__ . '/Controllers.php';
+require_once __DIR__ . '/Injection.php';
 
 return function (App $app) {
     $ticks = 0;
@@ -165,6 +177,115 @@ return function (App $app) {
     $app->sse('/auth/stream', Auth::bearer([$token => 'ana'], query: 'token'), function (Request $req, Sse $sse) {
         $sse->send((string)$req->user());
         $sse->close();
+    });
+
+    // Validation: handlers ask for a Dto and return what they got.
+    $app->post('/v/users', fn(Fixture\CreateUser $user) => $user);
+    $app->post('/v/orders', fn(Fixture\Order $order) => $order);
+    $app->get('/v/search', fn(Fixture\Search $search) => $search);
+    $app->post('/v/search', fn(#[Query] Fixture\Search $search) => $search);
+    $app->patch('/v/promoted', fn(Fixture\Promoted $user) => ['email' => $user->email, 'role' => $user->role]);
+    $app->post('/v/messaged', fn(Fixture\Messaged $input) => $input);
+    $app->post('/v/attachment', fn(Fixture\Attachment $input) => ['title' => $input->title, 'content' => (string)$input->doc->getStream()]);
+    $app->post('/v/guarded', Auth::bearer(fn(string $token) => $token === 'good' ? ['id' => 1] : null), fn(Fixture\CreateUser $user, Request $req) => [
+        'user' => $req->user(),
+        'current' => Request::current()->user(),
+        'email' => $user->email,
+    ]);
+    $app->post('/v/custom', fn(Fixture\Address $address) => $address);
+    $app->post('/v/custom-broken', fn(Fixture\Address $address) => $address);
+    $app->onInvalid(function (Invalid $e, Request $req) {
+        return match ($req->path()) {
+            '/v/custom' => Response::json(['fields' => array_column($e->details, 'field')], 400),
+            '/v/custom-broken' => throw new RuntimeException('onInvalid failure'),
+            default => $e->response,
+        };
+    });
+
+    // Injection: parameters come from the path, the request and the app.
+    $app->get('/i/path/:id', fn(int $id) => ['id' => $id]);
+    $app->get('/i/plan/:plan', fn(Fixture\Plan $plan) => ['plan' => $plan]);
+    $app->get('/i/params', fn(
+        #[Query] #[Min(1)] int $page = 1,
+        #[Query('per_page')] int $perPage = 20,
+        #[Header] string $xTenant = 'none',
+        #[Cookie('sid')] ?string $session = null,
+    ) => compact('page', 'perPage', 'xTenant', 'session'));
+    $app->get('/i/required-header', fn(#[Header('x-key')] string $key) => $key);
+    $app->post('/i/body-field', fn(#[Body] string $name, #[Body] int $age = 1) => compact('name', 'age'));
+    $app->post('/i/mixed/:id', fn(Request $req, Response $res, Fixture\Address $address, array $args, int $id, int $limit = 5) => [
+        'method' => $req->method(),
+        'city' => $address->city,
+        'args' => $args,
+        'id' => $id,
+        'limit' => $limit,
+        'response' => $res->getStatusCode(),
+    ]);
+    $app->get('/i/service', fn(Fixture\Clock $clock) => ['calls' => ++$clock->calls]);
+    $app->get('/i/scoped', fn(Fixture\Tenant $tenant, Fixture\Tenant $again, #[Depends(Fixture\TenantName::class)] string $name) => [
+        'same' => $tenant === $again,
+        'name' => $name,
+        'call' => $tenant->call,
+    ]);
+    $app->get('/i/abort', fn(#[Depends([Fixture\Deps::class, 'deny'])] string $denied) => 'unreachable');
+    $app->post('/i/both', fn(#[Depends([Fixture\Deps::class, 'needsHeader'])] int $need, Fixture\Address $address) => $need);
+    $app->get('/i/taken', function (Fixture\Clock $clock) {
+        throw new Invalid([['field' => 'email', 'rule' => 'taken', 'message' => 'Already registered.']]);
+    });
+    $app->get('/i/plain-abort', function () { throw new Abort(Response::text('teapot', 418)); });
+    $app->get('/i/controller/:id', [Fixture\InjectedController::class, 'show']);
+    $app->get('/i/controller-plain', [Fixture\InjectedController::class, 'plain']);
+    $app->get('/i/controller-slim/:id', [Fixture\InjectedController::class, 'slim']);
+    $app->get('/slim/named/:id', fn($request, $response, $id) => ['third' => $id]);
+    $app->get('/slim/untyped/:id', fn($id) => ['request' => $id instanceof Request]);
+    $app->get('/i/slow', fn(#[Depends([Fixture\Deps::class, 'slowName'])] string $round, #[Header('x-round')] string $header) => compact('round', 'header'));
+
+    // Registered after the routes that use them.
+    $clock = new Fixture\Clock();
+    $app->provide(Fixture\Clock::class, $clock);
+    $app->scoped(Fixture\Tenant::class, function (Request $req, Fixture\Clock $clock) {
+        return new Fixture\Tenant((string)$req->header('x-tenant', 'acme'), ++$clock->calls);
+    });
+
+    // Documentation: the fixture has a route for each thing the document must describe.
+    $guard = Auth::bearer(fn(string $token) => $token === 'good' ? 1 : null);
+    $app->group('/d', function (App $d) use ($guard, $users) {
+        $d->get('/items/:id(\d+)', #[Summary('One item')] fn(int $id) => $id);
+        $d->get('/names/:name([a-z]+)', fn(string $name) => $name);
+        $d->get('/opt[/{part}]', fn() => 'ok');
+        $d->get('/rest/*', fn() => 'ok');
+        $d->all('/every', fn() => 'ok');
+        $d->post('/users', fn(Fixture\CreateUser $user) => $user);
+        $d->post('/orders', fn(Fixture\Order $order) => 'ok');
+        $d->post('/upload', fn(Fixture\Attachment $input) => 'ok');
+        $d->post('/fields', fn(#[Body] string $name, #[Body] int $age = 1) => 'ok');
+        $d->get('/search', fn(Fixture\Search $search) => 'ok');
+        $d->delete('/filter', fn(#[Query] Fixture\Search $search) => 'ok');
+        $d->get('/depends', fn(#[Depends([Fixture\Deps::class, 'needsHeader'])] int $need) => $need);
+        $d->get('/users/:id', [Fixture\InjectedController::class, 'show']);
+        $d->get('/list', [Fixture\DocumentedController::class, 'list']);
+        $d->get('/many', [Fixture\DocumentedController::class, 'many']);
+        $d->get('/secret', [Fixture\DocumentedController::class, 'secret']);
+        $d->get('/closure-hidden', #[Hidden] fn() => 'ok');
+        $d->get('/plain', fn(Request $req) => 'ok');
+        $d->post('/slim/:id', fn($req, $res, array $args) => $res);
+        $d->get('/guarded', $guard, fn() => 'ok');
+        $d->get('/maybe', $guard->optional(), fn() => 'ok');
+        $d->get('/either', Auth::any(Auth::session(), Auth::basic($users)), fn() => 'ok');
+        $d->get('/both', $guard, Auth::apiKey(fn() => 1, 'X-Team'), fn() => 'ok');
+        $d->ws('/socket', ['message' => fn($conn, $data) => null]);
+        $d->sse('/stream', fn(Request $req, Sse $sse) => null);
+    });
+    $app->use('/d/zone', $guard);
+    $app->get('/d/zone/page', fn() => 'ok');
+    $app->get('/d/zoned', fn() => 'ok');
+
+    $app->enableDocs(title: 'Fixture & "docs"', version: '2.0.0');
+    $app->enableDocs(path: '/locked/docs', spec: '/locked/openapi.json', ui: 'swagger', middleware: [$guard]);
+    $app->enableDocs(path: '/redoc', spec: '/redoc.json', ui: 'redoc');
+    $app->enableDocs(path: '/no-ui', spec: '/only.json', ui: null);
+    $app->group('/grouped', $guard, function (App $grouped) {
+        $grouped->enableDocs();
     });
 
     $app->get('/deferred', function (Request $req) use ($app) {

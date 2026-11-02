@@ -38,6 +38,11 @@ class SessionGuard extends Guard
         return $id === null || $this->resolve === null ? $id : ($this->resolve)($id);
     }
 
+    public function security(): array
+    {
+        return ['sessionCookie' => ['type' => 'apiKey', 'in' => 'cookie', 'name' => Session::$name]];
+    }
+
     protected function challenge(Request $request): Response
     {
         return $this->redirect === null ? parent::challenge($request) : Response::redirect($this->redirect);

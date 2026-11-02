@@ -51,6 +51,11 @@ class BearerGuard extends Guard
         return is_callable($this->tokens) ? ($this->tokens)($token) : self::lookup($this->tokens, $token);
     }
 
+    public function security(): array
+    {
+        return ['bearerAuth' => ['type' => 'http', 'scheme' => 'bearer']];
+    }
+
     protected function token(Request $request): ?string
     {
         $pattern = '#^Bearer +([A-Za-z0-9\-._~+/]+=*)\z#i';

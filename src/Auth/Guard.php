@@ -67,6 +67,22 @@ abstract class Guard
         return $copy;
     }
 
+    /**
+     * How the OpenAPI document describes this guard: scheme name => security scheme. More
+     * than one means any of them is enough. Empty leaves the requirement undocumented.
+     *
+     * @return array<string, array<string, string>>
+     */
+    public function security(): array
+    {
+        return [];
+    }
+
+    public function isOptional(): bool
+    {
+        return $this->optional;
+    }
+
     protected function challenge(Request $request): Response
     {
         return Response::json(['error' => 'unauthorized'], 401);

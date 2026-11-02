@@ -26,6 +26,11 @@ class ApiKeyGuard extends BearerGuard
         parent::__construct($keys, $realm, $query);
     }
 
+    public function security(): array
+    {
+        return ["apiKey.$this->header" => ['type' => 'apiKey', 'in' => 'header', 'name' => $this->header]];
+    }
+
     protected function token(Request $request): ?string
     {
         $key = (string)$request->header($this->header);

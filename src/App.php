@@ -8,7 +8,7 @@ use ArrayObject;
 use Closure;
 use FastRoute\Dispatcher;
 use InvalidArgumentException;
-use ReflectionFunction;
+use Kuman\Validation\Invalid;
 use ReflectionMethod;
 use stdClass;
 use Throwable;
@@ -23,6 +23,11 @@ class App
     private const NOT_SERVED = ['php', 'phar', 'phtml'];
 
     private Router $router;
+
+    private Resolver $resolver;
+
+    /** @var array<int, Route> */
+    private array $routes = [];
 
     /** @var array<int, callable> */
     private array $middleware = [];
@@ -43,11 +48,15 @@ class App
     /** @var ?callable */
     private $notFoundHandler = null;
 
+    /** @var ?callable */
+    private $invalidHandler = null;
+
     private Closure $kernel;
 
     public function __construct(private readonly string $publicPath = '', private readonly bool $debug = false)
     {
         $this->router = new Router();
+        $this->resolver = new Resolver();
     }
 
     public function get(string $path, callable|array|string ...$handlers): static
@@ -96,10 +105,77 @@ class App
      */
     public function route(array $methods, string $path, callable|array|string ...$handlers): static
     {
+        return $this->define($methods, $path, $handlers);
+    }
+
+    /**
+     * An object handlers can ask for by type, one for the whole worker: a database
+     * connection, a client. Create it here, in the closure of app.php, after the fork.
+     */
+    public function provide(string $class, object $service): static
+    {
+        $this->resolver->provide($class, $service);
+        return $this;
+    }
+
+    /**
+     * Made for each request that asks for $class, at most once, by a function whose own
+     * parameters are injected: fn(Request $req, Db $db) => new Tenant(...).
+     */
+    public function scoped(string $class, callable|array|string $factory): static
+    {
+        $this->resolver->scoped($class, $factory);
+        return $this;
+    }
+
+    /**
+     * Serve an OpenAPI document and a page to browse it. Off unless called, because the
+     * document lists every route: put a guard in $middleware outside development.
+     *
+     * @param ?string $ui 'scalar', 'swagger', 'redoc', or null to serve only the document.
+     *     The pages load their scripts from a CDN.
+     * @param array<int, callable> $middleware
+     */
+    public function enableDocs(
+        string $path = '/docs',
+        string $title = 'API',
+        string $version = '1.0.0',
+        ?string $ui = 'scalar',
+        string $spec = '/openapi.json',
+        array $middleware = [],
+    ): static {
+        if ($ui !== null && !isset(OpenApi::PAGES[$ui])) {
+            throw new InvalidArgumentException("Unknown docs ui: $ui");
+        }
+
+        $document = null;
+        $serve = function () use (&$document, $title, $version): Response {
+            $document ??= json_encode(
+                (new OpenApi($this->routes, $this->middleware, $title, $version))->document(),
+                JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+            );
+            return new Response(200, ['Content-Type' => 'application/json'], $document);
+        };
+
+        $specPath = '/' . trim($this->prefix . '/' . ltrim($spec, '/'), '/');
+        $middleware = [...$this->scope, ...array_map(self::resolve(...), $middleware)];
+        // First, because a later static route is refused behind a route like /:slug.
+        array_unshift($this->routes, new Route(['GET'], $specPath, $middleware, $serve, $serve, false));
+        if ($ui !== null) {
+            $page = static fn() => Response::html(OpenApi::page($ui, $title, $specPath));
+            array_unshift($this->routes, new Route(['GET'], $this->prefix . $path, $middleware, $page, $page, false));
+        }
+        return $this;
+    }
+
+    /**
+     * @param array<int, callable|array|string> $handlers
+     */
+    private function define(array $methods, string $path, array $handlers, bool $documented = true): static
+    {
         $last = array_pop($handlers);
-        $handlers = array_map(self::resolve(...), $handlers);
-        $handler = self::answer($last);
-        $this->router->add($methods, $this->prefix . $path, self::pipe([...$this->scope, ...$handlers], $handler));
+        $middleware = [...$this->scope, ...array_map(self::resolve(...), $handlers)];
+        $this->routes[] = new Route($methods, $this->prefix . $path, $middleware, $last, self::resolve($last), $documented);
         return $this;
     }
 
@@ -111,7 +187,7 @@ class App
     {
         if (is_string($prefix) && str_starts_with($prefix, '/')) {
             $prefix = rtrim($this->prefix . $prefix, '/');
-            $middleware = array_map(static fn(callable $next) => self::under($prefix, $next), $middleware);
+            $middleware = array_map(static fn(callable $next) => new Prefixed($prefix, $next), $middleware);
         } else {
             array_unshift($middleware, $prefix);
         }
@@ -153,7 +229,7 @@ class App
     public function ws(string $path, callable|array ...$handlers): static
     {
         $on = array_pop($handlers);
-        return $this->route(['GET'], $path, ...[...$handlers, function (Request $request) use ($on) {
+        return $this->define(['GET'], $path, [...$handlers, function (Request $request) use ($on) {
             if (strcasecmp((string)$request->header('upgrade'), 'websocket') !== 0) {
                 return Response::text('Upgrade Required', 426);
             }
@@ -177,7 +253,7 @@ class App
             );
             WebSocket::input($request->rawBuffer(), $connection);
             return null;
-        }]);
+        }], false);
     }
 
     /**
@@ -187,7 +263,7 @@ class App
     {
         $handlers = array_map(self::resolve(...), $handlers);
         $handler = array_pop($handlers);
-        return $this->route(['GET'], $path, ...[...$handlers, function (Request $request) use ($handler) {
+        return $this->define(['GET'], $path, [...$handlers, function (Request $request) use ($handler) {
             $connection = $request->connection;
             $connection->send(new BaseResponse(200, [
                 'Content-Type' => 'text/event-stream',
@@ -203,7 +279,7 @@ class App
                 $stream->close();
             }
             return null;
-        }]);
+        }], false);
     }
 
     /**
@@ -257,8 +333,21 @@ class App
         return $this;
     }
 
+    /**
+     * Render validation failures: fn(Invalid $e, Request $request) => response.
+     * $e->details lists field, rule and message.
+     */
+    public function onInvalid(callable $handler): static
+    {
+        $this->invalidHandler = $handler;
+        return $this;
+    }
+
     public function start(Worker $worker): void
     {
+        foreach ($this->routes as $route) {
+            $this->router->add($route->methods, $route->path, self::pipe($route->middleware, $this->answer($route)));
+        }
         $this->router->compile();
         $this->kernel = self::pipe($this->middleware, $this->dispatch(...));
         $worker->onMessage = $this->onMessage(...);
@@ -341,6 +430,14 @@ class App
 
     private function render(Throwable $e, Request $request): Response
     {
+        // Thrown outside an injected handler, so the middleware will not see this answer.
+        if ($e instanceof Abort) {
+            try {
+                return Response::from($this->aborted($e, $request));
+            } catch (Throwable $failed) {
+                $e = $failed;
+            }
+        }
         $this->report($e);
         if ($this->errorHandler !== null) {
             try {
@@ -350,6 +447,13 @@ class App
             }
         }
         return Response::text($this->debug ? (string)$e : 'Internal Server Error', 500);
+    }
+
+    private function aborted(Abort $e, Request $request): mixed
+    {
+        return $e instanceof Invalid && $this->invalidHandler !== null
+            ? ($this->invalidHandler)($e, $request)
+            : $e->response;
     }
 
     private function report(Throwable $e): void
@@ -395,23 +499,30 @@ class App
         );
     }
 
-    private static function answer(callable|array|string $handler): callable
+    /**
+     * The last step of a route. Middleware has run by now, so a guard refuses a request
+     * before validation looks at it, and the request here is the one holding the user.
+     */
+    private function answer(Route $route): callable
     {
-        $callable = self::resolve($handler);
-        if (!self::wantsResponse($handler)) {
+        $plan = $this->resolver->plan($route->handler, $route->parameters());
+        if ($plan !== null) {
+            $route->steps = [...$plan['steps'], ...$plan['constructor']];
+            return function (Request $request) use ($plan): mixed {
+                try {
+                    return $this->resolver->handle($plan, $request);
+                } catch (Abort $e) {
+                    // Returned, not left to render(): middleware such as CORS must see it.
+                    return $this->aborted($e, $request);
+                }
+            };
+        }
+
+        $callable = $route->callable;
+        if (!Resolver::wantsResponse(Resolver::reflect($route->handler))) {
             return $callable;
         }
         return static fn(Request $request) => $callable($request, new Response(body: Stream::from()), $request->params);
-    }
-
-    private static function wantsResponse(callable|array|string $handler): bool
-    {
-        $function = match (true) {
-            is_callable($handler) => new ReflectionFunction(Closure::fromCallable($handler)),
-            is_array($handler) => new ReflectionMethod($handler[0], $handler[1]),
-            default => new ReflectionMethod($handler, '__invoke'),
-        };
-        return $function->getNumberOfParameters() > 1 || $function->isVariadic();
     }
 
     /**
@@ -434,16 +545,6 @@ class App
 
         // A new controller per request: the worker serves many requests, and state must not leak between them.
         return static fn(mixed ...$args) => (new $class())->$method(...$args);
-    }
-
-    private static function under(string $prefix, callable $middleware): Closure
-    {
-        return static function (Request $request, callable $next) use ($prefix, $middleware): mixed {
-            // Static files are looked up by decoded path, so compare the same form.
-            $path = preg_replace('~/+~', '/', rawurldecode($request->path()));
-            $inside = $path === $prefix || str_starts_with($path, "$prefix/");
-            return $inside ? $middleware($request, $next) : $next($request);
-        };
     }
 
     private static function isUnsafe(string $path): bool

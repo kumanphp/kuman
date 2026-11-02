@@ -48,6 +48,11 @@ class BasicGuard extends Guard
         return Auth::verify($password, $this->users[$username] ?? null) ? $username : null;
     }
 
+    public function security(): array
+    {
+        return ['basicAuth' => ['type' => 'http', 'scheme' => 'basic']];
+    }
+
     protected function challenge(Request $request): Response
     {
         return parent::challenge($request)

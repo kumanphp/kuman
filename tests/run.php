@@ -7,6 +7,8 @@ const PORT = 18642;
 $root = dirname(__DIR__);
 require "$root/vendor/autoload.php";
 require "$root/tests/fixture/ForeignResponse.php";
+require "$root/tests/fixture/Controllers.php";
+require "$root/tests/fixture/Injection.php";
 $tmp = "$root/tests/tmp";
 $failures = 0;
 $passes = 0;
@@ -675,7 +677,6 @@ function slimHandlers(): void
 
 function controllerErrors(): void
 {
-    require_once dirname(__DIR__) . '/tests/fixture/Controllers.php';
     $define = fn(mixed $handler) => fn() => (new Kuman\App())->get('/x', $handler);
     check('unknown class', throws($define([Fixture\Missing::class, 'run']), InvalidArgumentException::class));
     check('unknown method', throws($define([Fixture\UserController::class, 'nothing']), InvalidArgumentException::class));
@@ -995,6 +996,344 @@ function authentication(): void
     fclose($socket);
 }
 
+function jsonPost(string $path, mixed $body, array $headers = [], string $method = 'POST'): array
+{
+    $body = is_string($body) ? $body : json_encode($body);
+    return http($method, $path, ['Content-Type' => 'application/json', ...$headers], $body);
+}
+
+/**
+ * @return array<int, string> "field rule" of each error of a validation answer.
+ */
+function failures(array $response): array
+{
+    $details = json_decode($response['body'], true)['details'] ?? [];
+    return array_map(static fn(array $error) => "{$error['field']} {$error['rule']}", $details);
+}
+
+function validation(): void
+{
+    $valid = ['email' => 'a@b.co', 'password' => '12345678'];
+
+    $created = jsonPost('/v/users', $valid);
+    check('valid dto', $created['status'], 200);
+    check('defaults are kept', json_decode($created['body'], true), [
+        'email' => 'a@b.co', 'password' => '12345678', 'age' => 18, 'nick' => null, 'active' => false,
+        'score' => 0, 'plan' => 'free', 'level' => null, 'note' => null,
+    ]);
+
+    $invalid = jsonPost('/v/users', ['email' => 'nope']);
+    check('invalid status', $invalid['status'], 422);
+    check('invalid shape', json_decode($invalid['body'], true), [
+        'error' => 'Unprocessable Entity',
+        'details' => [
+            ['field' => 'email', 'rule' => 'email', 'message' => 'Must be a valid email address.'],
+            ['field' => 'password', 'rule' => 'required', 'message' => 'This field is required.'],
+        ],
+    ]);
+    check('middleware sees a 422', hasHeader($invalid, 'X-Global: yes'));
+
+    check('a null counts as absent', failures(jsonPost('/v/users', ['email' => null] + $valid)), ['email required']);
+    check('array for a string', failures(jsonPost('/v/users', ['email' => ['x']] + $valid)), ['email type']);
+    check('number for a string', failures(jsonPost('/v/users', ['email' => 5] + $valid)), ['email type']);
+    check('string for an int in json', failures(jsonPost('/v/users', ['age' => '30'] + $valid)), ['age type']);
+    check('string for a bool in json', failures(jsonPost('/v/users', ['active' => 'yes'] + $valid)), ['active type']);
+    check('float for an int', failures(jsonPost('/v/users', ['age' => 30.5] + $valid)), ['age type']);
+    // JSON has one number type: 3.0 is sent back as 3, 1.5 shows the float survived.
+    check('integer for a float', json_decode(jsonPost('/v/users', ['score' => 3] + $valid)['body'], true)['score'], 3);
+    check('infinite float', failures(jsonPost('/v/users', str_replace('}', ',"score":1e999}', json_encode($valid)))), ['score type']);
+    check('rule on a default free int', failures(jsonPost('/v/users', ['age' => 5] + $valid)), ['age min']);
+    check('second rule', failures(jsonPost('/v/users', ['age' => 121] + $valid)), ['age max']);
+    check('length counts characters', jsonPost('/v/users', ['email' => 'a@b.co', 'password' => str_repeat('é', 8)])['status'], 200);
+    check('long string', failures(jsonPost('/v/users', ['password' => str_repeat('x', 13)] + $valid)), ['password maxLength']);
+    check('first failing rule only', failures(jsonPost('/v/users', ['password' => ''] + $valid)), ['password minLength']);
+    check('unknown fields are ignored', jsonPost('/v/users', ['internal' => 'x', 'ignored' => 1, 'admin' => true] + $valid)['status'], 200);
+    check('enum', json_decode(jsonPost('/v/users', ['plan' => 'pro', 'level' => 2] + $valid)['body'], true)['level'], 2);
+    $enum = jsonPost('/v/users', ['plan' => 'gold'] + $valid);
+    check('unknown enum', json_decode($enum['body'], true)['details'][0]['message'], 'Must be one of: free, pro.');
+    check('enum of the wrong type', failures(jsonPost('/v/users', ['plan' => 1] + $valid)), ['plan type']);
+    check('int enum wants an int in json', failures(jsonPost('/v/users', ['level' => '2'] + $valid)), ['level type']);
+    check('readonly field', json_decode(jsonPost('/v/users', ['note' => 'hi'] + $valid)['body'], true)['note'], 'hi');
+
+    $form = ['Content-Type' => 'application/x-www-form-urlencoded'];
+    $formed = http('POST', '/v/users', $form, 'email=a@b.co&password=12345678&age=30&active=on&score=1.5&level=2');
+    check('form values are converted', array_intersect_key(json_decode($formed['body'], true), ['age' => 1, 'active' => 1, 'score' => 1, 'level' => 1]), [
+        'age' => 30, 'active' => true, 'score' => 1.5, 'level' => 2,
+    ]);
+    check('form int', failures(http('POST', '/v/users', $form, 'email=a@b.co&password=12345678&age=abc')), ['age type']);
+    check('form bool', failures(http('POST', '/v/users', $form, 'email=a@b.co&password=12345678&active=maybe')), ['active type']);
+    check('empty form bool', failures(http('POST', '/v/users', $form, 'email=a@b.co&password=12345678&active=')), ['active type']);
+    check('form array for an int', failures(http('POST', '/v/users', $form, 'email=a@b.co&password=12345678&age[]=1')), ['age type']);
+    check('form float', failures(http('POST', '/v/users', $form, 'email=a@b.co&password=12345678&score=abc')), ['score type']);
+
+    $malformed = jsonPost('/v/users', '{bad');
+    check('malformed json', [$malformed['status'], $malformed['body']], [400, '{"error":"Bad Request"}']);
+    check('middleware sees a 400', hasHeader($malformed, 'X-Global: yes'));
+    check('empty object', failures(jsonPost('/v/users', '{}')), ['email required', 'password required']);
+    check('json list', [jsonPost('/v/users', '[1,2]')['status'], failures(jsonPost('/v/users', '[1,2]'))], [422, [' type']]);
+    check('json string', failures(jsonPost('/v/users', '"text"')), [' type']);
+    check('no body', failures(http('POST', '/v/users')), ['email required', 'password required']);
+    check('query cannot fill a body', failures(jsonPost('/v/users?email=a@b.co&password=12345678', '{}')), ['email required', 'password required']);
+    check('query cannot add to a body', json_decode(jsonPost('/v/users?nick=evil', $valid)['body'], true)['nick'], null);
+
+    $order = ['address' => ['city' => 'Bandung'], 'items' => [['sku' => 'a', 'qty' => 2]], 'codes' => [1, 2], 'plans' => ['pro']];
+    $placed = json_decode(jsonPost('/v/orders', $order + ['parent' => $order])['body'], true);
+    check('nested dto', $placed['address'], ['city' => 'Bandung']);
+    check('list of dto', $placed['items'], [['sku' => 'a', 'qty' => 2]]);
+    check('list of enum', $placed['plans'], ['pro']);
+    check('dto holding itself', $placed['parent']['address'], ['city' => 'Bandung']);
+    check('nested errors have a path', failures(jsonPost('/v/orders', [
+        'address' => ['city' => 'x'],
+        'items' => [['sku' => 'a'], ['qty' => 0], 'text'],
+        'codes' => [1, 'two'],
+        'plans' => ['gold'],
+    ])), ['address.city minLength', 'items.1.sku required', 'items.1.qty min', 'items.2 type', 'codes.1 type', 'plans.0 type']);
+    check('list rule', failures(jsonPost('/v/orders', ['address' => ['city' => 'Bandung'], 'items' => []])), ['items minLength']);
+    check('text for an object', failures(jsonPost('/v/orders', ['address' => 'x', 'items' => 'y'])), ['address type', 'items type']);
+
+    check('get reads the query', json_decode(http('GET', '/v/search?q=abc&page=2&exact=1')['body'], true), ['q' => 'abc', 'page' => 2, 'exact' => true]);
+    check('head reads the query', http('HEAD', '/v/search?q=abc')['status'], 200);
+    check('query pattern', failures(http('GET', '/v/search?q=ABC')), ['q pattern']);
+    check('attribute picks the query', jsonPost('/v/search?q=abc', '{"q":"body"}')['status'], 200);
+    check('attribute leaves the body out', failures(jsonPost('/v/search', '{"q":"body"}')), ['q required']);
+
+    check('promoted properties and no constructor', json_decode(jsonPost('/v/promoted', ['email' => 'a@b.co'], [], 'PATCH')['body'], true), ['email' => 'a@b.co', 'role' => 'guest']);
+    check('rules on promoted properties', failures(jsonPost('/v/promoted', ['email' => 'x'], [], 'PATCH')), ['email email']);
+
+    $messages = json_decode(jsonPost('/v/messaged', ['name' => '', 'price' => 'x', 'code' => 'y'])['body'], true)['details'];
+    check('custom messages', array_column($messages, 'message'), ['Tell us your name.', 'Digits, please.', 'Starts with x.']);
+    check('required overrides a default', failures(jsonPost('/v/messaged', '{}')), ['name required']);
+
+    $boundary = 'xBOUNDARYx';
+    $part = "--$boundary\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nReport\r\n"
+        . "--$boundary\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nfile body\r\n";
+    $multipart = ['Content-Type' => "multipart/form-data; boundary=$boundary"];
+    check('upload field', json_decode(http('POST', '/v/attachment', $multipart, "$part--$boundary--\r\n")['body'], true), ['title' => 'Report', 'content' => 'file body']);
+    $noFile = "--$boundary\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nReport\r\n--$boundary--\r\n";
+    check('missing upload', failures(http('POST', '/v/attachment', $multipart, $noFile)), ['doc required']);
+    $textFile = "--$boundary\r\nContent-Disposition: form-data; name=\"doc\"\r\n\r\ntext\r\n--$boundary\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nReport\r\n--$boundary--\r\n";
+    check('text for an upload', failures(http('POST', '/v/attachment', $multipart, $textFile)), ['doc type']);
+
+    check('guard before validation', jsonPost('/v/guarded', '{}')['status'], 401);
+    $guarded = json_decode(jsonPost('/v/guarded', $valid, ['Authorization' => 'Bearer good'])['body'], true);
+    check('dto after a guard', $guarded, ['user' => ['id' => 1], 'current' => ['id' => 1], 'email' => 'a@b.co']);
+
+    $custom = jsonPost('/v/custom', '{}');
+    check('onInvalid', [$custom['status'], $custom['body']], [400, '{"fields":["city"]}']);
+    check('onInvalid passes through middleware', hasHeader($custom, 'X-Global: yes'));
+    check('a failing onInvalid is a 500', jsonPost('/v/custom-broken', '{}')['status'], 500);
+}
+
+function injection(): void
+{
+    check('typed path parameter', http('GET', '/i/path/42')['body'], '{"id":42}');
+    check('bad path parameter', failures(http('GET', '/i/path/abc')), ['id type']);
+    check('enum in the path', http('GET', '/i/plan/pro')['body'], '{"plan":"pro"}');
+    check('bad enum in the path', http('GET', '/i/plan/gold')['status'], 422);
+
+    check('defaults of parameters', json_decode(http('GET', '/i/params')['body'], true), ['page' => 1, 'perPage' => 20, 'xTenant' => 'none', 'session' => null]);
+    check('query, header and cookie', json_decode(http('GET', '/i/params?page=2&per_page=5', ['X-Tenant' => 'acme', 'Cookie' => 'sid=abc'])['body'], true), [
+        'page' => 2, 'perPage' => 5, 'xTenant' => 'acme', 'session' => 'abc',
+    ]);
+    check('rule on a parameter', failures(http('GET', '/i/params?page=0')), ['page min']);
+    check('renamed query fails by its name', failures(http('GET', '/i/params?per_page=x')), ['per_page type']);
+    check('required header', failures(http('GET', '/i/required-header')), ['x-key required']);
+    check('fields of the body', json_decode(jsonPost('/i/body-field', '{"name":"ana"}')['body'], true), ['name' => 'ana', 'age' => 1]);
+    check('field of a json body is strict', failures(jsonPost('/i/body-field', '{"name":1,"age":"2"}')), ['name type', 'age type']);
+
+    check('every kind together', json_decode(jsonPost('/i/mixed/7', '{"city":"Bandung"}')['body'], true), [
+        'method' => 'POST', 'city' => 'Bandung', 'args' => ['id' => '7'], 'id' => 7, 'limit' => 5, 'response' => 200,
+    ]);
+
+    $first = json_decode(http('GET', '/i/service')['body'], true)['calls'];
+    check('a service lives as long as the worker', json_decode(http('GET', '/i/service')['body'], true)['calls'] > $first);
+
+    $scoped = json_decode(http('GET', '/i/scoped', ['X-Tenant' => 'acme'])['body'], true);
+    check('scoped once per request', [$scoped['same'], $scoped['name']], [true, 'ACME']);
+    $next = json_decode(http('GET', '/i/scoped', ['X-Tenant' => 'next'])['body'], true);
+    check('scoped made again for the next request', [$next['name'], $next['call'] > $scoped['call']], ['NEXT', true]);
+
+    $abort = http('GET', '/i/abort');
+    check('abort from a dependency', [$abort['status'], $abort['body']], [403, '{"error":"forbidden"}']);
+    check('middleware sees an abort', hasHeader($abort, 'X-Global: yes'));
+    check('errors of a dependency and the handler together', failures(jsonPost('/i/both', '{}')), ['x-need required', 'city required']);
+    check('dependency not called on errors', jsonPost('/i/both', '{"city":"Bandung"}', ['X-Need' => '4'])['body'], '4');
+    check('invalid thrown by a handler', failures(http('GET', '/i/taken')), ['email taken']);
+    $plain = http('GET', '/i/plain-abort');
+    check('abort outside an injected handler', [$plain['status'], $plain['body']], [418, 'teapot']);
+    $log = (string)file_get_contents($GLOBALS['tmp'] . '/runtime/kuman.log');
+    check('aborts are not logged as errors', str_contains($log, 'Request aborted'), false);
+
+    check('constructor and method injection', json_decode(http('GET', '/i/controller/7')['body'], true), ['id' => 7, 'greeting' => 'hi', 'path' => '/i/controller/7']);
+    check('constructor injection, plain method', json_decode(http('GET', '/i/controller-plain')['body'], true), ['path' => '/i/controller-plain', 'clock' => true]);
+    check('constructor injection, slim method', hasHeader(http('GET', '/i/controller-slim/9'), 'X-Id: 9'));
+
+    check('untyped parameter stays a position', json_decode(http('GET', '/slim/named/7')['body'], true), ['third' => ['id' => '7']]);
+    check('untyped single parameter stays the request', http('GET', '/slim/untyped/7')['body'], '{"request":true}');
+}
+
+function openApi(): void
+{
+    $response = http('GET', '/openapi.json');
+    check('document status', $response['status'], 200);
+    check('document type', hasHeader($response, 'Content-Type: application/json'));
+    $doc = json_decode($response['body'], true);
+    $paths = $doc['paths'];
+    $schemas = $doc['components']['schemas'];
+    $param = static fn(string $path, string $method, string $name) => array_values(array_filter(
+        $paths[$path][$method]['parameters'] ?? [],
+        static fn(array $parameter) => $parameter['name'] === $name
+    ))[0] ?? null;
+
+    check('version', $doc['openapi'], '3.1.0');
+    check('info', $doc['info'], ['title' => 'Fixture & "docs"', 'version' => '2.0.0']);
+    check('document is stable', http('GET', '/openapi.json')['body'], $response['body']);
+    check('other documents list the same paths', json_decode(http('GET', '/only.json')['body'], true)['paths'], $paths);
+
+    check('integer path parameter', $param('/d/items/{id}', 'get', 'id'), ['name' => 'id', 'in' => 'path', 'required' => true, 'schema' => ['type' => 'integer']]);
+    check('summary on a closure', $paths['/d/items/{id}']['get']['summary'], 'One item');
+    check('string path parameter keeps its regex', $param('/d/names/{name}', 'get', 'name')['schema'], ['type' => 'string', 'pattern' => '^[a-z]+$']);
+    check('optional segment gives both paths', [isset($paths['/d/opt']), isset($paths['/d/opt/{part}'])], [true, true]);
+    check('wildcard is explained', $param('/d/rest/{wildcard}', 'get', 'wildcard')['description'], 'The rest of the path, slashes included.');
+    check('all() lists the methods', array_keys($paths['/d/every']), ['get', 'post', 'put', 'patch', 'delete']);
+
+    $post = $paths['/d/users']['post'];
+    check('dto reference', $post['requestBody'], ['content' => ['application/json' => ['schema' => ['$ref' => '#/components/schemas/CreateUser']]], 'required' => true]);
+    check('validation is documented', $post['responses'][422]['content']['application/json']['schema'], ['$ref' => '#/components/schemas/ValidationError']);
+    $user = $schemas['CreateUser'];
+    check('required fields', $user['required'], ['email', 'password']);
+    check('email schema', $user['properties']['email'], ['type' => 'string', 'format' => 'email', 'description' => 'Where the receipt goes.']);
+    check('length schema', $user['properties']['password'], ['type' => 'string', 'minLength' => 8, 'maxLength' => 12]);
+    check('number schema', $user['properties']['age'], ['type' => 'integer', 'minimum' => 13, 'maximum' => 120, 'default' => 18]);
+    check('nullable schema', $user['properties']['nick'], ['type' => ['string', 'null'], 'default' => null]);
+    check('enum default', $user['properties']['plan'], ['type' => 'string', 'enum' => ['free', 'pro'], 'default' => 'free']);
+    check('nullable enum', $user['properties']['level']['anyOf'], [['type' => 'integer', 'enum' => [1, 2]], ['type' => 'null']]);
+    check('private and static are not fields', array_keys($user['properties']), ['email', 'password', 'age', 'nick', 'active', 'score', 'plan', 'level', 'note']);
+
+    check('upload needs multipart', array_keys($paths['/d/upload']['post']['requestBody']['content']), ['multipart/form-data']);
+    check('upload schema', $schemas['Attachment']['properties']['doc'], ['type' => 'string', 'format' => 'binary']);
+    check('fields of a body', $paths['/d/fields']['post']['requestBody']['content']['application/json']['schema'], [
+        'type' => 'object',
+        'properties' => ['name' => ['type' => 'string'], 'age' => ['type' => 'integer', 'default' => 1]],
+        'required' => ['name'],
+    ]);
+    check('dto on get is the query', $param('/d/search', 'get', 'q'), ['name' => 'q', 'in' => 'query', 'required' => true, 'schema' => ['type' => 'string', 'pattern' => '^[a-z]+$']]);
+    check('no body on get', isset($paths['/d/search']['get']['requestBody']), false);
+    check('query attribute on delete', [$param('/d/filter', 'delete', 'page')['in'], isset($paths['/d/filter']['delete']['requestBody'])], ['query', false]);
+    check('parameters of dependencies', $param('/d/depends', 'get', 'x-need'), ['name' => 'x-need', 'in' => 'header', 'required' => true, 'schema' => ['type' => 'integer']]);
+
+    $show = $paths['/d/users/{id}']['get'];
+    check('summary and description', [$show['summary'], $show['description']], ['Show one', 'Reads the path and the clock.']);
+    check('returns', $show['responses'][200]['content']['application/json']['schema'], ['$ref' => '#/components/schemas/UserOut']);
+    check('returns description', $show['responses'][404]['description'], 'No such user');
+    check('default description', $paths['/d/plain']['get']['responses'][200]['description'], 'OK');
+    check('return type', $paths['/d/list']['get']['responses'][200]['content']['application/json']['schema'], ['$ref' => '#/components/schemas/UserOut']);
+    check('list of a class', $paths['/d/many']['get']['responses'][200]['content']['application/json']['schema'], ['type' => 'array', 'items' => ['$ref' => '#/components/schemas/UserOut']]);
+    check('text response', array_keys($paths['/d/many']['get']['responses'][201]['content']), ['text/html']);
+    check('tags of method and class', $paths['/d/list']['get']['tags'], ['admin', 'users']);
+    check('a response type may hold what a request cannot', $schemas['UserOut'], ['type' => 'object']);
+    check('dto holding itself', $schemas['Order']['properties']['parent']['anyOf'][0], ['$ref' => '#/components/schemas/Order']);
+    check('list of dto schema', $schemas['Order']['properties']['items'], ['type' => 'array', 'items' => ['$ref' => '#/components/schemas/Item'], 'minItems' => 1]);
+
+    check('hidden method', isset($paths['/d/secret']), false);
+    check('hidden closure', isset($paths['/d/closure-hidden']), false);
+    check('websocket is left out', isset($paths['/d/socket']), false);
+    check('stream is left out', isset($paths['/d/stream']), false);
+    check('the docs leave themselves out', [isset($paths['/docs']), isset($paths['/openapi.json'])], [false, false]);
+    check('plain handler has no 422', isset($paths['/d/plain']['get']['responses'][422]), false);
+    check('slim handler is a plain operation', array_keys($paths['/d/slim/{id}']['post']['responses']), [200]);
+
+    check('guard', [$paths['/d/guarded']['get']['security'], isset($paths['/d/guarded']['get']['responses'][401])], [[['bearerAuth' => []]], true]);
+    check('no guard', isset($paths['/d/plain']['get']['security']), false);
+    check('optional guard', [$paths['/d/maybe']['get']['security'], isset($paths['/d/maybe']['get']['responses'][401])], [[['bearerAuth' => []], []], false]);
+    check('any guard is an alternative', $paths['/d/either']['get']['security'], [['sessionCookie' => []], ['basicAuth' => []]]);
+    check('two guards are both needed', $paths['/d/both']['get']['security'], [['bearerAuth' => [], 'apiKey.X-Team' => []]]);
+    check('guard on a prefix', $paths['/d/zone/page']['get']['security'], [['bearerAuth' => []]]);
+    check('guard on a prefix respects the boundary', isset($paths['/d/zoned']['get']['security']), false);
+    check('security schemes', $doc['components']['securitySchemes']['apiKey.X-Team'], ['type' => 'apiKey', 'in' => 'header', 'name' => 'X-Team']);
+    check('session scheme', $doc['components']['securitySchemes']['sessionCookie']['in'], 'cookie');
+
+    $page = http('GET', '/docs');
+    check('docs page', [$page['status'], hasHeader($page, 'Content-Type: text/html')], [200, true]);
+    check('docs page points at the document', str_contains($page['body'], 'data-url="/openapi.json"'));
+    check('docs title is escaped', str_contains($page['body'], '<title>Fixture &amp; &quot;docs&quot;</title>'));
+    check('docs scripts are pinned', str_contains($page['body'], '@1.74.0/') && str_contains($page['body'], 'integrity="sha384-'));
+    check('docs with a guard', [http('GET', '/locked/docs')['status'], http('GET', '/locked/openapi.json')['status']], [401, 401]);
+    check('docs through a guard', str_contains(http('GET', '/locked/docs', ['Authorization' => 'Bearer good'])['body'], 'swagger-ui-bundle'));
+    check('redoc', str_contains(http('GET', '/redoc')['body'], '<redoc spec-url="/redoc.json">'));
+    check('document without a page', [http('GET', '/no-ui')['status'], http('GET', '/only.json')['status']], [404, 200]);
+    check('docs in a group', [http('GET', '/grouped/docs')['status'], http('GET', '/grouped/openapi.json')['status']], [401, 401]);
+    check('group prefix reaches the page', str_contains(http('GET', '/grouped/docs', ['Authorization' => 'Bearer good'])['body'], 'data-url="/grouped/openapi.json"'));
+}
+
+function injectionConcurrency(): void
+{
+    $sockets = [];
+    foreach (['one', 'two', 'three'] as $round) {
+        $sockets[$round] = connect();
+        fwrite($sockets[$round], "GET /i/slow HTTP/1.1\r\nHost: test\r\nX-Round: $round\r\n\r\n");
+    }
+    $started = microtime(true);
+    foreach ($sockets as $round => $socket) {
+        $answer = json_decode(readBody($socket, readHead($socket)), true);
+        check("suspended dependency keeps its request ($round)", $answer, ['round' => $round, 'header' => $round]);
+        fclose($socket);
+    }
+    check('dependencies suspend together', microtime(true) - $started < 0.25);
+}
+
+/**
+ * Mistakes in a route must stop the worker when it starts, not fail a request later.
+ */
+function injectionObjects(): void
+{
+    $boots = static function (callable $define): bool {
+        return !throws(static function () use ($define) {
+            $app = new Kuman\App();
+            $define($app);
+            $app->start(new Workerman\Worker());
+        });
+    };
+
+    check('a plain app boots', $boots(fn($app) => $app->get('/', fn() => 'x')));
+    check('dependency may be provided after the route', $boots(function ($app) {
+        $app->get('/', fn(Fixture\Clock $clock) => 'x');
+        $app->provide(Fixture\Clock::class, new Fixture\Clock());
+    }));
+    check('class nobody supplies', $boots(fn($app) => $app->get('/', fn(Fixture\Clock $clock) => 'x')), false);
+    check('class nobody supplies, with a default', $boots(fn($app) => $app->get('/', fn(?Fixture\Clock $clock = null) => 'x')));
+    check('untyped slim parameter named like the path', $boots(fn($app) => $app->get('/:id', fn($req, $res, $id) => 'x')));
+    check('untyped parameter beside a dto', $boots(fn($app) => $app->post('/', fn($req, Fixture\Address $address) => 'x')), false);
+    check('scalar that comes from nowhere', $boots(fn($app) => $app->post('/', fn(Fixture\Address $address, int $limit) => 'x')), false);
+    check('union parameter in the path', $boots(fn($app) => $app->get('/:id', fn(int|string $id) => 'x')), false);
+    check('unsupported property', throws(fn() => Kuman\Validation\Hydrator::fields(Fixture\BadProperty::class), InvalidArgumentException::class));
+    check('union property', throws(fn() => Kuman\Validation\Hydrator::fields(Fixture\UnionProperty::class), InvalidArgumentException::class));
+    check('abstract dto', throws(fn() => Kuman\Validation\Hydrator::fields(Fixture\AbstractDto::class), InvalidArgumentException::class));
+    check('a failed class is not cached', throws(fn() => Kuman\Validation\Hydrator::fields(Fixture\BadProperty::class), InvalidArgumentException::class));
+    check('list of an unknown type', throws(fn() => Kuman\Validation\Hydrator::fields(Fixture\BadItems::class), InvalidArgumentException::class));
+    check('broken pattern', throws(fn() => new Kuman\Validation\Attributes\Pattern('/['), InvalidArgumentException::class));
+
+    check('provide refuses a factory', throws(fn() => (new Kuman\App())->provide(Fixture\Clock::class, fn() => new Fixture\Clock()), InvalidArgumentException::class));
+    check('circular dependency', $boots(function ($app) {
+        $app->scoped(Fixture\Tenant::class, fn(Fixture\Clock $clock) => null);
+        $app->scoped(Fixture\Clock::class, fn(Fixture\Tenant $tenant) => null);
+        $app->get('/', fn(Fixture\Tenant $tenant) => 'x');
+    }), false);
+    check('controller constructor nobody supplies', $boots(fn($app) => $app->get('/', [Fixture\InjectedController::class, 'plain'])), false);
+    check('missing dependency target', throws(function () {
+        $app = new Kuman\App();
+        $app->get('/', fn(#[Kuman\Attributes\Depends('Fixture\\Nothing')] int $x) => 'x');
+        $app->start(new Workerman\Worker());
+    }));
+
+    check('docs behind a catch-all', $boots(function ($app) {
+        $app->get('/:slug', fn() => 'x');
+        $app->get('/*', fn() => 'x');
+        $app->enableDocs();
+    }));
+    check('unknown docs ui', throws(fn() => (new Kuman\App())->enableDocs(ui: 'nope'), InvalidArgumentException::class));
+}
+
 function suite(string $title, string $loop, array $tests): void
 {
     global $failures;
@@ -1016,7 +1355,7 @@ function suite(string $title, string $loop, array $tests): void
     echo $failures === $before ? "  ok\n" : "  failed\n";
 }
 
-$common = ['routing', 'middleware', 'controllers', 'slimHandlers', 'psr7Http', 'authentication', 'connectionHandling', 'errors', 'statics', 'realtime', 'websockets', 'reloading'];
+$common = ['routing', 'middleware', 'controllers', 'slimHandlers', 'psr7Http', 'authentication', 'validation', 'injection', 'openApi', 'connectionHandling', 'errors', 'statics', 'realtime', 'websockets', 'reloading'];
 
 try {
     echo "psr-7 objects\n";
@@ -1025,8 +1364,10 @@ try {
     controllerErrors();
     echo "authentication objects\n";
     authObjects();
+    echo "injection objects\n";
+    injectionObjects();
     suite('default event loop', '', $common);
-    suite('fiber event loop', 'fiber', [...$common, 'concurrency']);
+    suite('fiber event loop', 'fiber', [...$common, 'concurrency', 'injectionConcurrency']);
     echo "watcher\n";
     prepare();
     watching();

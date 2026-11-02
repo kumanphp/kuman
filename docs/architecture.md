@@ -11,6 +11,8 @@ the [README](../README.md) and [Requests and responses](request-response.md) ins
 - [Routing](#routing)
 - [Middleware](#middleware)
 - [Handlers](#handlers)
+- [Injection and validation](#injection-and-validation)
+- [OpenAPI](#openapi)
 - [HTTP messages](#http-messages)
 - [Authentication](#authentication)
 - [Long-lived connections](#long-lived-connections)
@@ -24,8 +26,8 @@ the [README](../README.md) and [Requests and responses](request-response.md) ins
 
 Kuman is a thin layer over [Workerman](https://github.com/walkor/workerman). Workerman
 owns the sockets, the event loop, the HTTP parser and the worker processes. Kuman adds
-Express-style routing, middleware, PSR-7 messages, and WebSocket and SSE on the HTTP
-port.
+Express-style routing, middleware, PSR-7 messages, WebSocket and SSE on the HTTP port,
+parameter injection with validation, and an OpenAPI document of the routes.
 
 | Dependency | Used for |
 |---|---|
@@ -46,7 +48,14 @@ Everything is in `src/`, in the `Kuman` namespace.
 |---|---|
 | `Server.php` | Master side: command line, configuration, creating the workers |
 | `App.php` | Worker side: route and middleware definitions, the request kernel, static files, error rendering, timers |
+| `Route.php` | One route as defined: methods, path, middleware, handler, and the steps found in the handler |
 | `Router.php` | Express-style paths on FastRoute, with a bounded match cache |
+| `Prefixed.php` | Middleware limited to a path prefix, from `use('/prefix', ...)` |
+| `Resolver.php` | Plans what a handler's parameters need when the worker starts, and supplies it per request |
+| `Abort.php` | Exception that answers with a response, without being logged |
+| `Validation/` | `Dto`, `Field` (reading and converting one value), `Hydrator` (filling a Dto), `Rule`, `Invalid`, and the rule attributes |
+| `Attributes/` | Parameter sources (`Query`, `Body`, `Header`, `Cookie`), `Depends`, and the documentation attributes |
+| `OpenApi.php` | Builds the OpenAPI 3.1 document from the routes, and the docs pages |
 | `Request.php` | Workerman's request extended with PSR-7 `ServerRequestInterface` |
 | `Response.php` | Standalone immutable PSR-7 response, converted to Workerman's when sent |
 | `Message.php` | Trait with the PSR-7 header methods shared by `Request` and `Response` |
@@ -105,8 +114,13 @@ kernel must not keep per-request state outside the request and `Context`.
 2. `require`s the application file and creates `new App($publicPath, $debug)`.
 3. Calls the closure, which defines routes and middleware. A handler that names a missing
    class or method throws here, so a mistake stops the worker at start.
-4. `App::start` compiles the router, builds the kernel, installs `onMessage` and, on
-   worker 0 only, starts the `every()` timers.
+4. `App::start` builds the pipeline of each route, which plans its handler (see
+   [Injection and validation](#injection-and-validation)); a parameter nobody supplies
+   throws here. It then compiles the router, builds the kernel, installs `onMessage` and,
+   on worker 0 only, starts the `every()` timers.
+
+Routes are collected as `Route` objects first and turned into pipelines only in `start()`,
+so `provide()` and `scoped()` may come after the routes that use them.
 
 Custom processes follow the same rule: `Server::process` instantiates the handler class
 after the fork and copies its Workerman callbacks onto the worker.
@@ -120,7 +134,8 @@ TcpConnection                    bytes in
       ├─ kernel                  global middleware, then App::dispatch
       │  └─ App::dispatch        400 for unsafe paths, then Router::match
       │     ├─ route found       sets $request->params, runs the route pipeline:
-      │     │                    group middleware, route middleware, answering handler
+      │     │                    group middleware, route middleware, answering handler,
+      │     │                    which Resolver::handle calls when it was planned
       │     └─ no route          public/ file, then 405, then notFound(), then 404
       ├─ Response::from          normalizes the result; a Throwable goes to App::render
       └─ Request::respond        toWorkerman(), then connection send() or close()
@@ -171,8 +186,9 @@ The route chain is built when the route is defined, from `$scope` plus the route
 middleware, so definition order matters inside a group. `App::group` saves and restores
 `$prefix` and `$scope`.
 
-`App::under` compares against the decoded path with repeated slashes collapsed, because
-static files are looked up by decoded path. A guard must see the same path the file lookup
+`use('/prefix', $mw)` wraps the middleware in a `Prefixed` object rather than a closure,
+so `OpenApi` can still find a guard inside it. `Prefixed` compares against the decoded
+path with repeated slashes collapsed, because static files are looked up by decoded path. A guard must see the same path the file lookup
 will use, or `/%70rivate/note.txt` would bypass `use('/private', $guard)`.
 
 ## Handlers
@@ -182,9 +198,63 @@ will use, or `/%70rivate/note.txt` would bypass `use('/private', $guard)`.
 new instance per request, so no state survives between requests; an instance passed in
 keeps its state.
 
-`App::answer` handles the last handler of a route. Reflection decides the call shape: a
-handler with more than one parameter, or a variadic one, is called Slim-style with
-`($request, $response, array $args)`. Anything else receives only the request.
+`App::answer` handles the last handler of a route. It asks `Resolver::plan` first. A
+handler whose parameters only fit the plain shapes gets no plan, and reflection decides
+the call shape as before: more than one parameter, or a variadic one, means Slim style,
+`($request, $response, array $args)`; anything else receives only the request.
+
+## Injection and validation
+
+`Resolver::plan` reads the parameters of a handler once, at `App::start`, and turns each
+into a **step**: request, response, route params, a provided service, a default, one
+field, a Dto, or a dependency with a plan of its own. A handler is planned when at least
+one step is something the plain shapes do not give. A controller whose constructor needs
+injecting is planned too, with the plain shape for its method if that is all it needs.
+
+The rule that keeps old handlers working: an untyped parameter is never read by name. In
+the Slim shape `fn($req, $res, $id)`, `$id` is a position and gets the route params, even
+on `/users/:id`. A planned handler with an untyped parameter fails at start.
+
+`Resolver::handle` runs a plan. The values a request produces, the dependency results and
+the decoded body, live in `$memo` and `$errors`, local variables of that call. The plan,
+the `Field` objects and the rule instances are shared by every request of the worker and
+hold descriptions only. That is what makes it safe on the fiber loop, with nothing to
+reset between requests.
+
+Errors from every step are collected before anything is called, so a client sees all its
+mistakes at once, and a dependency missing a value is not called. `Invalid` then carries
+them out. `App::answer` catches `Abort`, which `Invalid` extends, inside the route
+pipeline and returns its response, so middleware sees a 422 like any other answer. An
+`Abort` thrown anywhere else reaches `App::render`, which answers with it without
+logging.
+
+`Field` is the only place a value is converted. JSON keeps its types, so it is checked
+strictly; form, query, header and path values are strings and are converted. A value is
+checked before it is assigned, because a `TypeError` on a typed property would be a 500
+caused by the client. `Hydrator` creates a Dto without its constructor and sets each
+property through reflection, which also initialises `readonly` properties.
+
+The body is read once per request through `getParsedBody()`, so middleware that calls
+`withParsedBody()` is respected. Workerman casts a failed `json_decode()` to `[]` and a
+JSON scalar to a one-item list, so `Resolver::body` looks again at an empty result and
+refuses a list. Uploads are merged in only for multipart bodies, because
+`getUploadedFiles()` is cheap otherwise.
+
+## OpenAPI
+
+`enableDocs()` adds two `Route` objects at the front of the list, so a static `/docs` is
+never refused behind a route like `/:slug` defined earlier. They are not documented
+themselves, and neither are `ws()` and `sse()` routes.
+
+`OpenApi` builds the document from the `Route` list on the first request for it, then
+the worker keeps the JSON string. Paths come from `Router::parse`, which is FastRoute's
+own parser, so optional segments become separate paths and regex constraints become
+patterns. Parameters, bodies and the 422 response come from the steps `App::answer`
+stored on the route, through the plans of dependencies. Guards are found in the global
+middleware, the route's middleware, and inside `Prefixed`; each describes itself with
+`Guard::security()`.
+
+The pages are HTML strings that load pinned scripts from jsDelivr with integrity hashes.
 
 ## HTTP messages
 
@@ -306,6 +376,16 @@ when changing the code around it.
 | A login is saved at once | Sessions are written at destruct, after the response left. The client's next request could reach another worker first | `save()` in `Auth::login` | `login is stored before the response` |
 | The token's header cannot pick the algorithm | It would choose `none`, or HS256 with the public key as the secret | `alg` comparison in `Jwt::verify` | `jwt header names another algorithm` |
 | `runtime/sessions` is mode 0700 | File names are session ids | `mkdir` in `Server::run` | `session directory is private` |
+| Per-request values stay in locals of `Resolver::handle` | On the fiber loop, state kept on the shared resolver would leak between suspended requests | `$memo` local in `handle()` | `scoped made again for the next request`, `suspended dependency keeps its request` |
+| `Abort` is returned inside the pipeline | Thrown past the middleware, a 422 would lose CORS and other headers | `catch (Abort)` in `App::answer` | `middleware sees a 422` |
+| A Dto on POST reads the body only | `all()` merges the query, so a link could set fields the form did not send | `'body'` in `Resolver::input` | `query cannot fill a body` |
+| Malformed JSON is a 400 | Workerman decodes it to `[]`, which would look like an empty body | `json_last_error()` in `Resolver::body` | `malformed json` |
+| A JSON list is refused | Workerman turns `"text"` into `["text"]` | `array_is_list()` in `Resolver::body` | `json list` |
+| Values are checked before assignment | A `TypeError` on a typed property is a 500 caused by the client | `Field::cast` | `form int`, `infinite float` |
+| An untyped parameter is never read by name | `fn($req, $res, $id)` must keep receiving the route params | `$type !== null` in `Resolver::step` | `untyped parameter stays a position` |
+| `#[Required]` refuses empty values | Otherwise it would only change the message | `$explicit` in `Field::read` | `custom messages` |
+| The docs routes come first | FastRoute refuses a static route behind a variable one | `array_unshift` in `App::enableDocs` | `docs behind a catch-all` |
+| Prefix middleware is an object | A guard wrapped in a closure would leave its routes documented as public | `Prefixed` | `guard on a prefix` |
 
 The cache in question is the `$requests` array in `TcpConnection::baseRead`. It is keyed
 by the raw buffer, takes buffers up to 2048 bytes, and holds at most 512 entries.
@@ -315,10 +395,12 @@ by the raw buffer, takes buffers up to 2048 bytes, and holds at most 512 entries
 `composer test` runs `tests/run.php`, a single script with no test framework. `check()`
 compares with `===`, and the helpers speak raw HTTP and WebSocket over a socket.
 
-- Object tests (`psr7Objects`, `controllerErrors`, `authObjects`) run in the test process.
+- Object tests (`psr7Objects`, `controllerErrors`, `authObjects`, `injectionObjects`) run
+  in the test process. `injectionObjects` calls `App::start` with a bare `Worker` to check
+  that mistakes stop a worker at start.
 - Integration suites copy `tests/fixture/` to `tests/tmp/` and boot a real server through
   `bin/kuman` on port 18642. The common suite runs on the default loop and again on the
-  fiber loop, which adds the `concurrency` checks.
+  fiber loop, which adds the `concurrency` and `injectionConcurrency` checks.
 - `watching` and `configuration` run on their own, since they start and stop the server
   themselves.
 

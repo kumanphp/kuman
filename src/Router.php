@@ -6,6 +6,7 @@ namespace Kuman;
 
 use FastRoute\Dispatcher;
 use FastRoute\RouteCollector;
+use FastRoute\RouteParser\Std;
 
 use function FastRoute\simpleDispatcher;
 
@@ -62,6 +63,15 @@ final class Router
             }
         }
         return $match;
+    }
+
+    /**
+     * @return array<int, array<int, string|array{0: string, 1: string}>> A list of variants, more
+     *     than one with optional segments. Each is made of literal text and [name, regex] pairs.
+     */
+    public static function parse(string $path): array
+    {
+        return (new Std())->parse(self::pattern($path));
     }
 
     private static function pattern(string $path): string

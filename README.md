@@ -107,8 +107,9 @@ class UserController
 ```
 
 Kuman creates the controller **for each request**, so a property never carries data from
-one request to the next. A controller needs a constructor without required arguments;
-for anything else pass an instance, `[$controller, 'show']`, and it keeps its state.
+one request to the next. Its constructor parameters are injected like a handler's (see
+[Validation and injection](#validation-and-injection)); an instance passed in,
+`[$controller, 'show']`, keeps its state.
 A missing class or method, or a private method, stops the worker at start, like a
 routing mistake, and does not fail later in a request. `ws()` still takes callbacks.
 
@@ -213,6 +214,53 @@ $app->get('/orders', Auth::any(Auth::session($loadUser), Auth::jwt($jwt)), $hand
 - `Auth::login($req, $id)` starts a session login with a new session id, and
   `Auth::logout($req, $response)` ends it.
 - Login attempts are not rate limited: put a limiter in front of your login route.
+
+## Validation and injection
+
+> Types, rules, sources and error format: [docs/validation.md](docs/validation.md).
+> Services, per-request values and `#[Depends]`: [docs/injection.md](docs/injection.md).
+
+A handler can declare what it needs as typed parameters. A **Dto** is filled from the
+request and validated before the handler runs; invalid input gets a 422 listing every
+problem, and the handler never runs.
+
+```php
+use Kuman\Validation\Attributes\{Email, MinLength};
+use Kuman\Validation\Dto;
+
+class CreateUser implements Dto
+{
+    #[Email]
+    public string $email;
+
+    #[MinLength(8)]
+    public string $password;
+
+    public int $age = 18;
+}
+
+return function (App $app) {
+    $app->provide(PDO::class, new PDO($dsn));      // one per worker
+
+    $app->post('/users', fn(CreateUser $user, PDO $db) => createUser($db, $user));
+    $app->get('/users/:id', fn(int $id, PDO $db) => findUser($db, $id));
+};
+```
+
+Kuman works out every parameter when the worker starts, so one it cannot supply stops the
+worker there. Handlers in the plain shapes, `fn(Request $req)` and
+`fn($request, $response, array $args)`, are called as before.
+
+## API documentation
+
+> Attributes, responses and security schemes: [docs/openapi.md](docs/openapi.md).
+
+```php
+$app->enableDocs(title: 'Orders API', version: '1.0.0');   // /docs and /openapi.json
+```
+
+The OpenAPI 3.1 document is read from the routes, Dto classes and guards. Docs are off
+unless enabled; outside development, pass a guard in `middleware:`.
 
 ## PSR-7
 
