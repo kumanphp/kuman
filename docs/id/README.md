@@ -6,16 +6,19 @@
 
 [English](../../README.md)
 
-Microframework PHP untuk proses long-running, dibangun langsung di atas
-[Workerman](https://github.com/walkor/workerman) dengan routing ala Express.
-Satu file route, tanpa folder `config/`, dan HTTP, WebSocket, serta SSE berjalan
-di satu port.
+Kuman adalah microframework PHP untuk aplikasi yang berjalan terus-menerus
+(long-running). Kuman dibangun langsung di atas
+[Workerman](https://github.com/walkor/workerman), dan cara menulis route-nya mirip
+Express. Semua route ditulis di satu file, tidak ada folder `config/`, dan HTTP,
+WebSocket, serta SSE bisa dilayani dari port yang sama.
 
-Butuh PHP 8.2+ dengan ekstensi `pcntl` dan `posix` (Linux atau macOS).
+Kuman membutuhkan PHP 8.2 atau lebih baru dengan ekstensi `pcntl` dan `posix`, dan
+berjalan di Linux atau macOS.
 
 ## Mulai
 
-Mulai proyek baru dari [skeleton](https://github.com/kumanphp/app):
+Cara paling cepat adalah membuat proyek baru dari
+[skeleton](https://github.com/kumanphp/app):
 
 ```bash
 composer create-project kumanphp/app myapp
@@ -23,15 +26,17 @@ cd myapp
 vendor/bin/kuman
 ```
 
-Lalu buka <http://localhost:8642>. Definisikan route Anda di `app.php`.
+Setelah itu buka <http://localhost:8642>. Route aplikasi Anda ditulis di `app.php`.
 
-### Tambahkan ke proyek yang sudah ada
+### Menambahkan Kuman ke proyek yang sudah ada
+
+Pasang paketnya dengan Composer:
 
 ```bash
 composer require kumanphp/kuman
 ```
 
-Buat `app.php`:
+Lalu buat file `app.php`:
 
 ```php
 <?php
@@ -45,19 +50,19 @@ return function (App $app) {
 };
 ```
 
-Jalankan, lalu buka <http://localhost:8642>:
+Jalankan server, lalu buka <http://localhost:8642>:
 
 ```bash
 vendor/bin/kuman
 ```
 
-Saat berjalan di foreground, Kuman me-reload worker otomatis setiap ada file PHP
-yang berubah.
+Selama berjalan di foreground, Kuman otomatis me-reload worker setiap kali ada file
+PHP yang berubah.
 
 ## Routing
 
 ```php
-$app->get('/users/:id', $handler);          // juga post, put, patch, delete, options
+$app->get('/users/:id', $handler);          // tersedia juga post, put, patch, delete, options
 $app->all('/any', $handler);                // semua method
 $app->route(['GET', 'POST'], '/form', $handler);
 
@@ -65,13 +70,16 @@ $app->get('/users/:id(\d+)', $handler);     // parameter dengan regex
 $app->get('/files/*', $handler);            // $req->param('wildcard')
 ```
 
-Daftarkan route statis sebelum route dinamis yang menutupinya, misalnya `/users/me`
-sebelum `/users/:id`. Urutan terbalik membuat worker gagal start dan terus restart,
-dengan pesan error di terminal atau di `runtime/kuman.log`.
+Route statis harus didaftarkan lebih dulu daripada route dinamis yang juga cocok
+dengan path-nya. Contohnya, daftarkan `/users/me` sebelum `/users/:id`. Kalau
+urutannya terbalik, worker gagal start dan terus mencoba restart. Pesan error-nya
+muncul di terminal atau di `runtime/kuman.log`.
 
-Kelompokkan route dengan prefix. Argumen terakhir mendefinisikan route, argumen
-sebelumnya adalah middleware untuk seluruh grup. Grup boleh bersarang, dan `use()` di
-dalam grup berlaku untuk route yang didefinisikan sesudahnya di grup itu.
+Route dengan prefix yang sama bisa dikelompokkan dengan `group()`. Argumen terakhir
+adalah fungsi yang berisi daftar route. Argumen di antara prefix dan fungsi itu adalah
+middleware yang berlaku untuk semua route di dalam grup. Grup bisa dibuat di dalam
+grup lain. Jika Anda memanggil `use()` di dalam grup, middleware tersebut hanya berlaku
+untuk route di grup itu yang didaftarkan setelahnya.
 
 ```php
 $app->group('/api', $auth, function (App $api) {
@@ -84,9 +92,9 @@ $app->group('/api', $auth, function (App $api) {
 
 ### Controller
 
-Handler boleh berupa method controller, atau kelas invokable. Argumen sebelum handler
-terakhir pada sebuah route adalah middleware route, dan itu juga boleh method
-controller.
+Selain closure, handler bisa berupa method di sebuah controller, atau kelas yang punya
+method `__invoke()`. Middleware route, yaitu argumen sebelum handler terakhir, juga bisa
+berupa method controller.
 
 ```php
 $app->get('/users/:id', [UserController::class, 'show']);
@@ -101,24 +109,31 @@ class UserController
 {
     public function show(Request $req)
     {
-        return ['id' => $req->param('id')];          // mengembalikan seperti handler biasa
+        return ['id' => $req->param('id')];          // sama seperti handler biasa
     }
 }
 ```
 
-Kuman membuat controller **untuk setiap request**, jadi properti tidak membawa data dari
-satu request ke request berikutnya. Parameter constructor-nya di-inject seperti parameter
-handler (lihat [Validasi dan injeksi](#validasi-dan-injeksi)); instance yang dikirim
-langsung, `[$controller, 'show']`, menyimpan state-nya. Kelas atau method yang tidak ada, atau method private,
-menghentikan worker saat start seperti kesalahan routing, bukan gagal belakangan di
-tengah request. `ws()` tetap menerima callback.
+Kuman membuat objek controller baru untuk setiap request. Artinya, nilai yang disimpan
+di properti controller tidak terbawa ke request berikutnya. Parameter constructor
+controller diisi otomatis dengan cara yang sama seperti parameter handler (lihat
+[Validasi dan injeksi](#validasi-dan-injeksi)). Lain halnya jika Anda memberikan objek
+yang sudah dibuat, misalnya `[$controller, 'show']`. Objek itu dipakai terus, jadi isi
+propertinya tetap tersimpan dari satu request ke request berikutnya.
+
+Kalau kelas atau method-nya tidak ada, atau method-nya private, worker langsung
+berhenti saat start, sama seperti kesalahan routing. Dengan begitu kesalahan ini
+ketahuan sejak awal dan tidak baru muncul saat ada request masuk.
+
+Route WebSocket (`ws()`) tidak bisa memakai controller dan tetap memakai callback.
 
 ## Handler dan response
 
-> Semua method `Request` dan `Response`, dengan contoh dan tutorial langkah demi langkah:
-> [request-response.md](request-response.md).
+Daftar lengkap method `Request` dan `Response`, beserta contoh dan tutorial langkah
+demi langkah, ada di [request-response.md](request-response.md).
 
-Handler menerima `Kuman\Request` dan **mengembalikan** response:
+Handler menerima objek `Kuman\Request` dan harus mengembalikan response. Jenis
+response ditentukan dari nilai yang dikembalikan:
 
 ```php
 fn() => 'teks';                        // HTML
@@ -129,13 +144,14 @@ fn() => Response::redirect('/login');
 fn(Request $req) => Response::file('/path/laporan.pdf', $req);
 ```
 
-Yang tersedia di request: `param()`, `get()`, `post()`, `input()`, `all()`,
-`header()`, `cookie()`, `file()`, `ip()`, `user()`, dan `connection`. Body JSON otomatis
-terbaca lewat `post()`. Kode yang tidak menerima `$req` bisa memakai
-`Request::current()`.
+Method yang bisa dipakai di request antara lain `param()`, `get()`, `post()`,
+`input()`, `all()`, `header()`, `cookie()`, `file()`, `ip()`, `user()`, dan properti
+`connection`. Body berformat JSON dibaca otomatis, dan isinya bisa diambil lewat
+`post()`. Jika sebuah kode tidak menerima `$req` sebagai parameter, ambil request yang
+sedang diproses dengan `Request::current()`.
 
-Handler yang mendeklarasikan parameter kedua juga menerima `Response` kosong untuk
-diisi dan parameter route, seperti di Slim:
+Jika handler punya parameter kedua, Kuman juga mengirim objek `Response` kosong dan
+parameter route. Cara ini sama seperti di Slim:
 
 ```php
 $app->get('/hello/{name}', function ($request, $response, array $args) {
@@ -144,16 +160,22 @@ $app->get('/hello/{name}', function ($request, $response, array $args) {
 });
 ```
 
-`{name}` dan `:name` sama saja, dan `$args` adalah `$req->params`. Tulis ke body
-sebelum membuat salinan dengan `withStatus()` atau `withHeader()`, atau kembalikan
-salinan yang Anda tulisi. Handler dengan satu parameter, atau tanpa parameter,
-dipanggil seperti sebelumnya. Hanya handler terakhir sebuah route yang mendapat ini;
-middleware route tetap `($request, $next)`. Seperti biasa, handler harus
-**mengembalikan** response: tanpa `return`, Kuman menunggu `respond()` yang datang
-belakangan.
+Penulisan `{name}` dan `:name` sama artinya, dan `$args` berisi nilai yang sama dengan
+`$req->params`.
 
-`null` berarti handler memegang koneksi dan akan menjawab nanti. Handler yang lupa
-`return` membuat klien menunggu terus.
+Perhatikan urutannya. Tulis isi body terlebih dulu, baru panggil `withStatus()` atau
+`withHeader()`, karena kedua method itu membuat salinan response. Kalau Anda menulis
+body setelah membuat salinan, tulis ke salinan itu dan kembalikan salinan tersebut.
+
+Handler dengan satu parameter atau tanpa parameter tetap dipanggil seperti biasa.
+Hanya handler terakhir di sebuah route yang mendapat parameter tambahan ini.
+Middleware route tetap menerima `($request, $next)`.
+
+Handler harus selalu mengembalikan response dengan `return`. Nilai `null` punya arti
+khusus, yaitu handler akan mengirim response sendiri nanti lewat `$req->respond()`.
+Karena itu, handler yang lupa menulis `return` akan membuat klien menunggu terus.
+
+Contoh response yang baru dikirim dua detik kemudian:
 
 ```php
 $app->get('/lambat', function (Request $req) use ($app) {
@@ -164,9 +186,10 @@ $app->get('/lambat', function (Request $req) use ($app) {
 
 ## Middleware
 
-Middleware menerima request dan `$next`. `$next` selalu mengembalikan response,
-atau `null` untuk koneksi yang dipegang handler (WebSocket, SSE, respons tertunda).
-Karena itu pakai `?->` saat mengubah hasilnya.
+Middleware menerima request dan `$next`. Memanggil `$next($req)` meneruskan request ke
+middleware berikutnya atau ke handler, lalu mengembalikan response-nya. Hasilnya bisa
+`null` jika koneksi dijawab sendiri oleh handler, misalnya pada WebSocket, SSE, atau
+response yang dikirim belakangan. Karena itu, pakai `?->` saat mengubah hasil `$next`.
 
 ```php
 $logger = function (Request $req, callable $next) {
@@ -180,8 +203,8 @@ $auth = fn(Request $req, callable $next) => $req->header('x-token') === 'rahasia
     : Response::json(['error' => 'unauthorized'], 401);
 
 $app->use($logger);                     // semua request, termasuk 404
-$app->use('/admin', $auth);             // satu prefix path
-$app->get('/me', $auth, $handler);      // satu route
+$app->use('/admin', $auth);             // hanya path dengan prefix ini
+$app->get('/me', $auth, $handler);      // satu route saja
 
 $app->group('/api', $auth, function (App $api) {
     $api->get('/orders', fn() => []);
@@ -190,11 +213,12 @@ $app->group('/api', $auth, function (App $api) {
 
 ## Autentikasi
 
-> Semua guard dan opsinya, termasuk session, kunci JWT, dan kesalahan umum:
-> [auth.md](auth.md).
+Penjelasan lengkap tentang semua guard dan opsinya, termasuk session, kunci JWT, dan
+kesalahan yang sering terjadi, ada di [auth.md](auth.md).
 
-`Kuman\Auth` membuat guard, yaitu middleware. Guard meloloskan request dan mencatat
-user-nya, atau menjawab 401.
+`Kuman\Auth` menyediakan guard. Guard adalah middleware yang memeriksa siapa pengirim
+request. Jika pemeriksaan berhasil, request diteruskan dan data user-nya bisa dibaca
+lewat `$req->user()`. Jika gagal, guard menjawab dengan status 401.
 
 ```php
 $jwt = new Jwt(getenv('JWT_SECRET'));
@@ -209,21 +233,26 @@ $app->get('/dashboard', Auth::session($loadUser, redirect: '/login'), $handler);
 $app->get('/orders', Auth::any(Auth::session($loadUser), Auth::jwt($jwt)), $handler);
 ```
 
-- `Auth::verify($password, $user?->password)` memeriksa password, dan memakan waktu yang
-  sama saat akunnya tidak ada. `Auth::hash()` membuat hash-nya.
-- `$jwt->issue(['sub' => $id])` membuat token. Algoritma HS, RS, dan ES didukung.
-- `Auth::login($req, $id)` memulai login session dengan session id baru, dan
-  `Auth::logout($req, $response)` mengakhirinya.
-- Percobaan login tidak dibatasi: pasang rate limiter di depan route login Anda.
+- `Auth::verify($password, $user?->password)` memeriksa password. Lama prosesnya tetap
+  sama walaupun akunnya tidak ada, supaya orang lain tidak bisa menebak akun mana yang
+  terdaftar dari lamanya respons. Untuk membuat hash password, pakai `Auth::hash()`.
+- `$jwt->issue(['sub' => $id])` membuat token JWT. Algoritma yang didukung adalah HS,
+  RS, dan ES.
+- `Auth::login($req, $id)` memulai login berbasis session dan membuat session id baru.
+  `Auth::logout($req, $response)` mengakhiri login tersebut.
+- Kuman tidak membatasi jumlah percobaan login. Pasang rate limiter sendiri di depan
+  route login Anda.
 
 ## Validasi dan injeksi
 
-> Tipe, rule, sumber data, dan format error: [validation.md](validation.md).
-> Layanan, nilai per request, dan `#[Depends]`: [injection.md](injection.md).
+Detail tipe data, rule, sumber data, dan format error ada di
+[validation.md](validation.md). Penjelasan tentang layanan, nilai per request, dan
+`#[Depends]` ada di [injection.md](injection.md).
 
-Handler bisa mendeklarasikan kebutuhannya lewat parameter bertipe. **Dto** diisi dari
-request dan divalidasi sebelum handler berjalan; input yang salah dijawab 422 berisi semua
-masalahnya, dan handler tidak dijalankan.
+Handler bisa meminta data yang dibutuhkannya lewat parameter yang diberi tipe.
+Parameter bertipe Dto diisi dari data request, lalu divalidasi sebelum handler
+dijalankan. Jika ada input yang salah, Kuman menjawab dengan status 422 berisi daftar
+semua kesalahannya, dan handler tidak dijalankan.
 
 ```php
 use Kuman\Validation\Attributes\{Email, MinLength};
@@ -241,34 +270,38 @@ class CreateUser implements Dto
 }
 
 return function (App $app) {
-    $app->provide(PDO::class, new PDO($dsn));      // satu per worker
+    $app->provide(PDO::class, new PDO($dsn));      // satu objek per worker
 
     $app->post('/users', fn(CreateUser $user, PDO $db) => createUser($db, $user));
     $app->get('/users/:id', fn(int $id, PDO $db) => findUser($db, $id));
 };
 ```
 
-Kuman menentukan asal setiap parameter saat worker start, jadi parameter yang tidak bisa
-dipenuhi menghentikan worker di situ. Handler dengan bentuk biasa, `fn(Request $req)` dan
-`fn($request, $response, array $args)`, dipanggil seperti sebelumnya.
+Kuman memeriksa dari mana setiap parameter akan diisi pada saat worker start. Jika ada
+parameter yang tidak bisa diisi, worker langsung berhenti saat itu juga. Handler dengan
+bentuk biasa, yaitu `fn(Request $req)` dan `fn($request, $response, array $args)`, tetap
+dipanggil seperti biasa.
 
 ## Dokumentasi API
 
-> Attribute, respons, dan security scheme: [openapi.md](openapi.md).
+Penjelasan tentang attribute, response, dan security scheme ada di
+[openapi.md](openapi.md).
 
 ```php
 $app->enableDocs(title: 'Orders API', version: '1.0.0');   // /docs dan /openapi.json
 ```
 
-Dokumen OpenAPI 3.1 dibaca dari route, kelas Dto, dan guard. Docs nonaktif sampai
-diaktifkan; di luar development, pasang guard lewat `middleware:`.
+Kuman menyusun dokumen OpenAPI 3.1 dari route, kelas Dto, dan guard yang Anda tulis.
+Fitur ini tidak aktif sampai Anda memanggil `enableDocs()`. Di luar lingkungan
+development, lindungi halaman docs dengan guard lewat parameter `middleware:`.
 
 ## PSR-7
 
-`Kuman\Request` mengimplementasikan `Psr\Http\Message\ServerRequestInterface` dan
-`Kuman\Response` mengimplementasikan `ResponseInterface`, jadi kode PSR-7 dan
-pustaka middleware bisa dipakai. Keduanya immutable: setiap `with*()` mengembalikan
-salinan.
+`Kuman\Request` mengimplementasikan `Psr\Http\Message\ServerRequestInterface`, dan
+`Kuman\Response` mengimplementasikan `ResponseInterface`. Dengan begitu, kode dan
+pustaka middleware yang mengikuti PSR-7 bisa dipakai di Kuman. Kedua objek ini
+immutable. Setiap method `with*()` tidak mengubah objek aslinya, tetapi mengembalikan
+salinan baru.
 
 ```php
 $app->use(function (Request $req, callable $next) {
@@ -282,27 +315,33 @@ $app->post('/upload', function (Request $req) {
 });
 ```
 
-- Handler boleh mengembalikan response PSR-7 apa pun, dari Kuman maupun pustaka
-  lain. Body-nya dibaca saat response dikirim.
-- Salinan request tetap selaras dengan accessor Kuman: setelah `withUri()`,
-  `withRequestTarget()`, `withMethod()`, `withHeader()`, atau `withQueryParams()`,
-  router serta `path()`, `method()`, `header()`, dan `get()` melihat nilai barunya.
-  `post()`, `file()`, `input()`, dan `all()` tetap membaca body yang diterima, jadi
-  pakai `getParsedBody()` dan `getUploadedFiles()` setelah `withParsedBody()` atau
-  `withUploadedFiles()`. Pengecualiannya `withBody()`: ia mengganti body untuk
-  keduanya.
-- `Request::current()` dan `$req->connection` milik request yang diterima Kuman,
-  bukan salinannya. Pengecualiannya guard autentikasi, yang menjadikan salinan pembawa
-  user sebagai request saat ini. `respond()` boleh dipanggil dari request asli maupun
-  salinan.
-- Header response divalidasi: nama dengan spasi atau nilai dengan baris baru
-  melempar `InvalidArgumentException`, yang menjadi 500.
-- Nama header request datang dalam huruf kecil dari Workerman, dan header yang
-  berulang sudah digabung dengan koma menjadi satu nilai.
-- Ganti `header()` Workerman yang mengubah objek pada response dengan
-  `withHeader()`, dan `cookie()` dengan `withCookie()`.
+- Handler boleh mengembalikan response PSR-7 dari pustaka mana pun, tidak harus dari
+  Kuman. Body-nya baru dibaca saat response dikirim.
+- Perubahan pada salinan request ikut terbaca oleh method bawaan Kuman. Setelah Anda
+  memanggil `withUri()`, `withRequestTarget()`, `withMethod()`, `withHeader()`, atau
+  `withQueryParams()`, router dan method `path()`, `method()`, `header()`, serta
+  `get()` memakai nilai yang baru.
+- Hal di atas tidak berlaku untuk `post()`, `file()`, `input()`, dan `all()`.
+  Keempatnya tetap membaca body asli dari request. Jadi setelah memakai
+  `withParsedBody()` atau `withUploadedFiles()`, baca datanya dengan `getParsedBody()`
+  dan `getUploadedFiles()`. Pengecualiannya adalah `withBody()`, yang mengganti body
+  untuk kedua kelompok method tersebut.
+- `Request::current()` dan `$req->connection` selalu merujuk ke request asli yang
+  diterima Kuman, bukan ke salinannya. Pengecualiannya adalah guard autentikasi. Guard
+  menjadikan salinan yang sudah berisi data user sebagai request saat ini. `respond()`
+  boleh dipanggil dari request asli maupun dari salinannya.
+- Header response divalidasi. Nama header yang mengandung spasi atau nilai yang
+  mengandung baris baru akan memunculkan `InvalidArgumentException`, dan klien menerima
+  status 500.
+- Workerman mengirim nama header request dalam huruf kecil. Header yang muncul lebih
+  dari sekali sudah digabung menjadi satu nilai yang dipisahkan koma.
+- Method `header()` dan `cookie()` milik Workerman mengubah objek response secara
+  langsung. Di Kuman, ganti keduanya dengan `withHeader()` dan `withCookie()`.
 
 ## WebSocket
+
+Route WebSocket dibuat dengan `ws()`. Callback `open`, `message`, dan `close` dipanggil
+saat klien tersambung, mengirim pesan, dan terputus.
 
 ```php
 $app->ws('/chat', [
@@ -311,12 +350,13 @@ $app->ws('/chat', [
     'close' => fn($conn) => null,
 ]);
 
-$app->ws('/private', $auth, ['message' => $onMessage]);   // middleware menjaga upgrade
+$app->ws('/private', $auth, ['message' => $onMessage]);   // middleware memeriksa request sebelum koneksi di-upgrade
 ```
 
 ## Server-Sent Events
 
-Timer dari `$sse->every()` berhenti otomatis saat klien terputus.
+Route SSE dibuat dengan `sse()`. Timer yang dibuat dengan `$sse->every()` otomatis
+berhenti saat klien terputus.
 
 ```php
 $app->sse('/time', function (Request $req, Sse $sse) {
@@ -328,32 +368,39 @@ $app->sse('/time', function (Request $req, Sse $sse) {
 
 ## Timer dan state
 
-Closure di `app.php` dijalankan sekali per worker setelah fork, jadi tempat yang
-tepat untuk membuka koneksi database dan menyimpan state. Nilainya bertahan antar
-request, tapi hanya di worker itu.
+Fungsi yang dikembalikan oleh `app.php` dijalankan satu kali di setiap worker, setelah
+proses worker dibuat (fork). Karena itu, fungsi ini cocok untuk membuka koneksi
+database dan menyimpan state. Nilai yang disimpan di sini tetap ada dari satu request
+ke request berikutnya, tetapi hanya di worker tersebut. Worker lain punya salinannya
+sendiri.
 
 ```php
 return function (App $app) {
     $db = new PDO($dsn);        // satu koneksi per worker
 
-    $app->every(60, fn() => $db->query('SELECT 1'));   // hanya di worker pertama
+    $app->every(60, fn() => $db->query('SELECT 1'));   // hanya berjalan di worker pertama
 };
 ```
 
-Exception di request dan callback bawaan Kuman dicatat tanpa mematikan worker.
-Bungkus callback lain, misalnya `Timer::add()` langsung, dengan `$app->guard($fn)`.
-Tampilan error bisa diganti dengan `$app->onError()` dan `$app->notFound()`.
+Jika terjadi exception saat memproses request atau di dalam callback yang dijalankan
+Kuman, exception itu dicatat dan worker tetap berjalan. Untuk callback yang tidak
+dijalankan lewat Kuman, misalnya `Timer::add()` yang dipanggil langsung, bungkus
+dengan `$app->guard($fn)` agar diperlakukan sama. Tampilan halaman error bisa diganti
+dengan `$app->onError()`, dan halaman 404 dengan `$app->notFound()`.
 
 ## File statis
 
-File di `public/` disajikan otomatis saat tidak ada route yang cocok, lengkap
-dengan `Range` dan `If-Modified-Since`. File `.php` dan dotfile tidak pernah
-disajikan, kecuali `.well-known/`.
+Jika tidak ada route yang cocok, Kuman mencari file di folder `public/` dan
+mengirimkannya. Header `Range` dan `If-Modified-Since` sudah didukung. File `.php` dan
+file yang namanya diawali titik tidak pernah dikirim, kecuali file di dalam
+`.well-known/`.
 
 ## Konfigurasi
 
-Default sudah cukup untuk mulai. Urutan prioritas, dari terlemah: `kuman.php`, env,
-lalu flag.
+Anda bisa langsung mulai tanpa mengubah pengaturan apa pun. Pengaturan bisa diisi di
+tiga tempat, yaitu `kuman.php`, environment variable, dan flag di command line. Jika
+pengaturan yang sama diisi di beberapa tempat, nilai dari flag yang dipakai. Tanpa
+flag, nilai dari env yang dipakai. `kuman.php` hanya dipakai jika keduanya tidak diisi.
 
 | Pengaturan | Flag | Env | Default |
 |---|---|---|---|
@@ -362,61 +409,73 @@ lalu flag.
 | Jumlah worker | `--workers` | `WORKERS` | jumlah CPU |
 | Event loop | `--loop` | `KUMAN_LOOP` | otomatis |
 | Detail error di response | `--debug` | `KUMAN_DEBUG` | mati |
-| Reload otomatis | | `KUMAN_WATCH` | aktif di foreground |
+| Reload otomatis | | `KUMAN_WATCH` | aktif saat di foreground |
 | File aplikasi | `--app` | | `app.php` |
 
-`kuman.php` bersifat opsional, dan diperlukan untuk proses tambahan:
+File `kuman.php` tidak wajib ada. File ini baru diperlukan jika Anda ingin menjalankan
+proses tambahan:
 
 ```php
 <?php
 
 return [
     'port' => 8642,
-    'memory_limit' => 256,      // MB, worker di atas batas ini didaur ulang
+    'memory_limit' => 256,      // MB, worker yang memakai memori di atas batas ini akan di-restart
     'processes' => [
         'queue' => ['handler' => App\QueueWorker::class, 'count' => 2],
     ],
 ];
 ```
 
-Handler adalah nama class yang dibuat setelah fork, dan boleh punya method
-`onWorkerStart`, `onMessage`, `onClose`, serta callback Workerman lainnya. Isi
-`listen` jika proses perlu membuka port sendiri. Perubahan pada `kuman.php` butuh
-`kuman restart`.
+Nilai `handler` adalah nama kelas. Objek dari kelas ini dibuat setelah fork, dan
+kelasnya boleh punya method `onWorkerStart`, `onMessage`, `onClose`, serta callback
+Workerman lainnya. Isi `listen` jika proses tersebut perlu membuka port sendiri.
+Setelah mengubah `kuman.php`, jalankan `kuman restart` agar perubahannya terbaca.
 
 ## Perintah
 
 ```bash
-vendor/bin/kuman              # start di foreground
-vendor/bin/kuman start -d     # daemon
+vendor/bin/kuman              # jalankan di foreground
+vendor/bin/kuman start -d     # jalankan sebagai daemon
 vendor/bin/kuman reload       # muat ulang kode
-vendor/bin/kuman stop
-vendor/bin/kuman status
-vendor/bin/kuman connections
+vendor/bin/kuman stop         # hentikan server
+vendor/bin/kuman status       # lihat status worker
+vendor/bin/kuman connections  # lihat daftar koneksi
 ```
 
-## Hal yang perlu diingat
+## Hal yang perlu diperhatikan
 
-Kuman menjalankan kode di proses yang terus hidup, berbeda dari PHP-FPM.
+Cara kerja Kuman berbeda dari PHP-FPM. Di PHP-FPM, semua variabel dan objek dibuang
+setiap kali request selesai. Di Kuman, proses worker terus hidup dan melayani banyak
+request. Karena perbedaan ini, ada beberapa hal yang perlu diperhatikan.
 
-- **Kode blocking menahan worker.** Query PDO atau `sleep()` membuat satu worker
-  melayani satu request pada satu waktu, jadi `WORKERS` adalah kapasitas utama.
-- **Fiber hanya membantu kode async.** `--loop=fiber` butuh `revolt/event-loop` dan
-  membuat `Timer::sleep()` tidak memblokir, tapi tidak mengubah PDO atau curl biasa.
-- **State tidak dibagi antar worker.** Broadcast WebSocket ke semua worker butuh
-  pub/sub seperti Redis.
-- **Reload memutus koneksi panjang.** Klien WebSocket dan SSE harus reconnect.
-- **Pasang `ext-event` di produksi.** Tanpanya loop `select()` dibatasi 1024 koneksi.
-- **`exit()` dan `die()` mengakhiri worker,** bukan hanya request.
+- Kode blocking membuat worker tertahan. Selama sebuah worker menjalankan query PDO
+  atau `sleep()`, worker itu tidak bisa melayani request lain. Jadi jumlah request yang
+  bisa dilayani bersamaan bergantung pada jumlah worker (`WORKERS`).
+- Mode fiber hanya membantu kode yang async. `--loop=fiber` membutuhkan paket
+  `revolt/event-loop` dan membuat `Timer::sleep()` tidak memblokir worker. PDO dan
+  curl biasa tetap memblokir.
+- State tidak dibagi antar worker. Jika Anda ingin mengirim pesan WebSocket ke klien
+  di semua worker, gunakan pub/sub seperti Redis.
+- Reload memutus koneksi yang sedang terbuka. Klien WebSocket dan SSE harus menyambung
+  ulang.
+- Pasang `ext-event` di server produksi. Tanpa ekstensi ini, Kuman memakai `select()`
+  yang hanya bisa menangani 1024 koneksi.
+- `exit()` dan `die()` menghentikan seluruh worker, tidak hanya request yang sedang
+  diproses.
 
 ## Tes
+
+Jalankan tes dengan perintah berikut:
 
 ```bash
 composer test
 ```
 
-Tes menjalankan server sungguhan di port 18642, pada loop default dan fiber.
+Tes ini menjalankan server sungguhan di port 18642, dengan event loop default dan
+dengan fiber.
 
 ## Lisensi
 
-MIT. Sebagian kode diadaptasi dari [webman](https://github.com/walkor/webman).
+MIT. Sebagian kode diambil dan disesuaikan dari
+[webman](https://github.com/walkor/webman).

@@ -365,7 +365,7 @@ Isinya controller, group, middleware, cookie, dan halaman error. Buat proyek dan
 `mkdir storage` di samping `app.php`.
 
 Jalankan dengan satu worker, karena catatan disimpan di memori dan
-[state tidak dibagi antar worker](README.md#hal-yang-perlu-diingat):
+[state tidak dibagi antar worker](README.md#hal-yang-perlu-diperhatikan):
 
 ```bash
 WORKERS=1 vendor/bin/kuman
