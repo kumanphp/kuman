@@ -161,6 +161,37 @@ function routing(): void
     $notAllowed = http('POST', '/');
     check('405 status', $notAllowed['status'], 405);
     check('405 allow header', hasHeader($notAllowed, 'Allow: GET'));
+
+    check('route file returning a callable', http('GET', '/loaded/books')['body'], 'books');
+    check('route file using $app directly', http('GET', '/loaded/notes')['body'], 'notes');
+    check('a pattern does not descend into folders', http('GET', '/loaded/panel')['status'], 404);
+    $panel = http('GET', '/loaded/admin/panel');
+    check('route file in a group', [$panel['body'], hasHeader($panel, 'X-Group: yes')], ['panel', true]);
+    $stats = http('GET', '/loaded/admin/stats');
+    check('nested load is relative to its file and keeps the group', [$stats['body'], hasHeader($stats, 'X-Group: yes')], ['stats', true]);
+}
+
+function routeFileErrors(): void
+{
+    $dir = sys_get_temp_dir() . '/kuman-load-' . getmypid();
+    @mkdir($dir);
+    file_put_contents("$dir/array.php", "<?php\nreturn ['not' => 'a callable'];\n");
+    file_put_contents("$dir/plain.php", "<?php\n\$app->get('/plain', fn() => 'plain');\n");
+    // From another directory, so a path resolved against the cwd fails.
+    $cwd = getcwd();
+    chdir($dir);
+    try {
+        $load = fn(string ...$paths) => fn() => (new Kuman\App())->load(...$paths);
+        check('missing route file', throws($load("$dir/missing.php"), InvalidArgumentException::class));
+        check('pattern without a match', throws($load("$dir/*.inc"), InvalidArgumentException::class));
+        check('route file returning something else', throws($load("$dir/array.php"), InvalidArgumentException::class));
+        check('absolute route file', throws($load("$dir/plain.php")), false);
+        check('relative to the calling file', throws($load('fixture/routes/books.php')), false);
+    } finally {
+        chdir($cwd);
+        array_map(unlink(...), glob("$dir/*.php"));
+        rmdir($dir);
+    }
 }
 
 function middleware(): void
@@ -1362,6 +1393,8 @@ try {
     psr7Objects();
     echo "controllers\n";
     controllerErrors();
+    echo "route files\n";
+    routeFileErrors();
     echo "authentication objects\n";
     authObjects();
     echo "injection objects\n";

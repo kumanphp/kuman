@@ -184,7 +184,10 @@ files:
 
 The route chain is built when the route is defined, from `$scope` plus the route's own
 middleware, so definition order matters inside a group. `App::group` saves and restores
-`$prefix` and `$scope`.
+`$prefix` and `$scope`. `App::load` requires route files on the same `App`, so a file
+loaded inside a group inherits both. It resolves relative paths against the calling
+file, read from `debug_backtrace`, and requires each file in a static closure so the
+file sees `$app` but not `$this`.
 
 `use('/prefix', $mw)` wraps the middleware in a `Prefixed` object rather than a closure,
 so `OpenApi` can still find a guard inside it. `Prefixed` compares against the decoded

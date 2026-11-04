@@ -90,6 +90,41 @@ $app->group('/api', $auth, function (App $api) {
 });
 ```
 
+### File route
+
+Jika `app.php` mulai panjang, pindahkan route ke beberapa file terpisah dan muat
+dengan `load()`. Path relatif dihitung dari folder file yang memanggil `load()`. Pola
+seperti `routes/*.php` memuat semua file yang cocok, diurutkan berdasarkan nama. Isi
+subfolder tidak ikut dimuat.
+
+```php
+// app.php
+return function (App $app) {
+    $app->provide(PDO::class, new PDO($dsn));
+
+    $app->load('routes/web.php', 'routes/api/*.php');
+    $app->group('/admin', $auth, fn(App $admin) => $admin->load('routes/admin.php'));
+};
+```
+
+File route mengembalikan fungsi yang menerima `App`, sama seperti `app.php`. Anda juga
+bisa langsung memakai `$app` tanpa membuat fungsi:
+
+```php
+// routes/admin.php
+return function (App $app) {
+    $app->get('/users', [AdminController::class, 'users']);    // GET /admin/users
+};
+
+// routes/web.php
+$app->get('/', fn() => 'Beranda');
+```
+
+File yang dimuat di dalam grup ikut memakai prefix dan middleware grup tersebut. Worker
+langsung berhenti saat start jika file tidak ditemukan, jika pola tidak cocok dengan
+file apa pun, atau jika file mengembalikan sesuatu selain fungsi. File route dimuat di
+setiap worker, jadi mengubah file route akan me-reload worker seperti file lainnya.
+
 ### Controller
 
 Selain closure, handler bisa berupa method di sebuah controller, atau kelas yang punya

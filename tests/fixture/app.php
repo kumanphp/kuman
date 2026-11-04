@@ -62,6 +62,9 @@ return function (App $app) {
     });
     $app->get('/outside', fn() => 'outside');
 
+    $app->load('routes/*.php');
+    $app->group('/loaded/admin', $tag('Group'), fn(App $admin) => $admin->load('routes/admin/panel.php'));
+
     $app->get('/controller/users/mine', [Fixture\UserController::class, 'mine']);
     $app->get('/controller/users/:id', [Fixture\UserController::class, 'show']);
     $app->post('/controller/users', [Fixture\UserController::class, 'create']);

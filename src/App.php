@@ -221,6 +221,40 @@ class App
     }
 
     /**
+     * Define routes from other files: load('routes/users.php', 'routes/admin/*.php').
+     * A relative path is relative to the file that calls load(), and a pattern loads its
+     * matches in name order. A file returns function (App $app) { ... }, like app.php, or
+     * uses $app directly. Inside a group, the routes get the group's prefix and middleware.
+     */
+    public function load(string ...$paths): static
+    {
+        $caller = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 1)[0]['file'] ?? null;
+        $base = $caller === null ? (string)getcwd() : dirname($caller);
+
+        foreach ($paths as $path) {
+            if (!str_starts_with($path, '/')) {
+                $path = "$base/$path";
+            }
+            $files = strpbrk($path, '*?[') === false ? [$path] : (glob($path) ?: []);
+            $files = array_values(array_filter($files, is_file(...)));
+            if ($files === []) {
+                throw new InvalidArgumentException("load('$path') found no file");
+            }
+
+            foreach ($files as $file) {
+                // Static and in its own scope, so the file sees $app but not $this.
+                $define = (static fn(App $app) => require $file)($this);
+                if (is_callable($define)) {
+                    $define($this);
+                } elseif ($define !== 1 && $define !== null) {
+                    throw new InvalidArgumentException("$file must return a callable that receives Kuman\\App, or nothing");
+                }
+            }
+        }
+        return $this;
+    }
+
+    /**
      * WebSocket on the HTTP port. The last argument holds the open, message and close
      * callbacks, the ones before it are route middleware.
      *

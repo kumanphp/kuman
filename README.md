@@ -83,6 +83,40 @@ $app->group('/api', $auth, function (App $api) {
 });
 ```
 
+### Route files
+
+When `app.php` grows, move routes into separate files and load them with `load()`. A
+relative path is relative to the file that calls `load()`. A pattern such as
+`routes/*.php` loads every match in name order, without descending into subfolders.
+
+```php
+// app.php
+return function (App $app) {
+    $app->provide(PDO::class, new PDO($dsn));
+
+    $app->load('routes/web.php', 'routes/api/*.php');
+    $app->group('/admin', $auth, fn(App $admin) => $admin->load('routes/admin.php'));
+};
+```
+
+A route file returns a function that receives `App`, like `app.php`. It can also skip
+the function and use `$app` directly:
+
+```php
+// routes/admin.php
+return function (App $app) {
+    $app->get('/users', [AdminController::class, 'users']);    // GET /admin/users
+};
+
+// routes/web.php
+$app->get('/', fn() => 'Home');
+```
+
+A file loaded inside a group gets that group's prefix and middleware. A missing file,
+a pattern that matches nothing, or a file that returns something other than a function
+stops the worker at start. Route files are loaded in each worker, so changing one
+reloads the workers like any other file.
+
 ### Controllers
 
 A handler can be a controller method, or an invokable class. Anything before the last
